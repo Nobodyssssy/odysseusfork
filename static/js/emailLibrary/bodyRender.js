@@ -209,6 +209,8 @@ function _prepareEmailInlineImages(html) {
     const label = alt || (isCid ? 'Inline image' : 'Remote image');
     const ph = doc.createElement('span');
     ph.className = 'email-inline-image-placeholder';
+    // odysseus-email-table-placeholder-fix-v1: keep newsletter table cells shrinkable.
+    if (img.closest('td, th')) ph.classList.add('is-table-image');
     ph.setAttribute('role', 'group');
     ph.setAttribute('aria-label', label);
     if (src) ph.dataset.emailImgSrc = src;
@@ -389,7 +391,11 @@ export function _wireEmailInlineImages(reader) {
       manualPlaceholders.forEach(ph => ph.remove());
       _disableInlineImages().catch(() => {});
     });
-    first.parentNode?.insertBefore(bar, first);
+    // odysseus-email-table-placeholder-fix-v1: never inject the full-width
+    // load-all toolbar inside a newsletter <td>; it changes table sizing.
+    const emailBody = first.closest('.email-reader-body');
+    if (emailBody) emailBody.prepend(bar);
+    else first.parentNode?.insertBefore(bar, first);
   }
   placeholders.forEach(ph => {
     if (ph.dataset.wired !== '1') {

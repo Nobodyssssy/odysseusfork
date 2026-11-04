@@ -4750,3 +4750,45 @@ body.notes-drag-mode .notes-pane-body {
   overflow: hidden;
   touch-action: none;
 }
+
+/* odysseus-email-table-placeholder-fix-v1
+   Newsletter images often live in narrow HTML table cells. Keep the blocked
+   image marker from forcing a minimum table-column width. Remote images remain
+   blocked until the reader's existing explicit Load action is used. */
+.email-reader-body.html-body td .email-inline-image-placeholder.is-table-image,
+.email-reader-body.html-body th .email-inline-image-placeholder.is-table-image {
+  display: flex;
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  min-height: 0;
+  margin: 2px 0;
+  padding: 5px;
+  gap: 4px;
+  flex-wrap: wrap;
+  overflow: hidden;
+}
+.email-reader-body.html-body .email-inline-image-placeholder.is-table-image .email-inline-image-skeleton {
+  width: 24px;
+  height: 24px;
+  flex: 0 0 24px;
+}
+.email-reader-body.html-body .email-inline-image-placeholder.is-table-image .email-inline-image-info {
+  flex: 1 1 72px;
+  min-width: 0;
+  overflow: hidden;
+}
+.email-reader-body.html-body .email-inline-image-placeholder.is-table-image .email-inline-image-actions {
+  margin-left: 0;
+  flex: 0 0 auto;
+}
+.email-reader-body.html-body .email-inline-image-placeholder.is-table-image .email-inline-image-title,
+.email-reader-body.html-body .email-inline-image-placeholder.is-table-image .email-inline-image-sub {
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+.email-reader-body.html-body td,
+.email-reader-body.html-body th {
+  overflow-wrap: normal;
+}
