@@ -109,6 +109,8 @@ async function initialize() {
   providers.textContent = 'Providers';
   providers.title = 'Shared Odysseus and Hermes providers';
   providers.style.cssText = 'margin-left:8px;color:inherit';
+  const rememberPage = () => { providers.href = '/static/provider-sync.html?return=' + encodeURIComponent(location.pathname + location.search + location.hash); };
+  for (const type of ['pointerenter', 'focus', 'click', 'auxclick']) providers.addEventListener(type, rememberPage);
   bar.append(selector, providers, message);
   document.querySelector('#chat-container').prepend(bar);
   try { await restoreChatState(message); }

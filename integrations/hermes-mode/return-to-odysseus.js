@@ -23,10 +23,10 @@
   const status = document.createElement('span');
   status.id = 'odysseus-return-status';
   status.setAttribute('role', 'status');
-  link.addEventListener('click', async event => {
-    event.preventDefault();
-    if (link.getAttribute('aria-disabled') === 'true') return;
-    link.setAttribute('aria-disabled', 'true');
+  async function leave(control, destination) {
+    if (nav.getAttribute('aria-busy') === 'true') return;
+    nav.setAttribute('aria-busy', 'true');
+    control.setAttribute('aria-disabled', 'true');
     status.textContent = '';
     try {
       if (typeof S === 'undefined' || !S._bootReady) throw new Error('Wait for Hermes to finish loading before returning.');
@@ -56,17 +56,25 @@
         sessionStorage.setItem(key, JSON.stringify({ text, start: input?.selectionStart || 0, end: input?.selectionEnd || 0 }));
       }
       if ((input?.value || '') !== text || (S.session?.session_id || null) !== sid || S.pendingFiles?.length) throw new Error('Your chat, draft or attachments changed while saving. Click Return again.');
-      location.assign(target.href);
+      location.assign(destination);
     } catch (error) {
       status.textContent = error.message;
-      link.removeAttribute('aria-disabled');
+      control.removeAttribute('aria-disabled');
+      nav.removeAttribute('aria-busy');
     }
-  });
+  }
+  link.addEventListener('click', event => { event.preventDefault(); leave(link, target.href); });
   const providers = document.createElement('a');
   providers.id = 'odysseus-providers-link';
   providers.textContent = 'Providers';
   providers.href = new URL('/static/provider-sync.html', target).href;
-  providers.title = 'Shared Odysseus and Hermes providers';
+  providers.title = 'Shared Odysseus and Hermes providers; Back returns here';
+  providers.addEventListener('click', event => {
+    event.preventDefault();
+    const destination = new URL('/static/provider-sync.html', target);
+    destination.searchParams.set('return', location.href);
+    leave(providers, destination.href);
+  });
   nav.append(link, providers, status);
   document.body.append(nav);
   for (let attempt = 0; attempt < 150; attempt++) {

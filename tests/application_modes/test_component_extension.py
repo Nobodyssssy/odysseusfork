@@ -31,18 +31,19 @@ console.log(requested);
         script = ROOT / 'integrations/hermes-mode/return-to-odysseus.js'
         code = r"""
 const fs=require('fs'),vm=require('vm');
-let href;const requested=[];
-const element=()=>({setAttribute(){},addEventListener(){},append(){},set href(v){href=v},get href(){return href}});
+let href;const requested=[],hrefs={};
+const element=()=>{const e={setAttribute(){},removeAttribute(){},getAttribute(){return null},addEventListener(){},append(){}};
+ Object.defineProperty(e,'href',{set(v){e._href=v;if(e.id==='odysseus-return-control')href=v;hrefs[e.id]=v},get(){return e._href}});return e;};
 vm.runInNewContext(fs.readFileSync(process.argv[1],'utf8'),{
  URL,AbortSignal,console:{warn(){}},
  location:{protocol:'http:',hostname:'hermes.localhost',port:'7000',origin:'http://hermes.localhost:7000'},
  document:{baseURI:'http://hermes.localhost:7000/',createElement:element,body:{append(){}}},
  fetch:(url)=>{requested.push(String(url));return new Promise(()=>{});}
 });
-setImmediate(()=>console.log(JSON.stringify({href,requested})));
+setImmediate(()=>console.log(JSON.stringify({href,requested,providers:hrefs['odysseus-providers-link']})));
 """
         result = json.loads(subprocess.check_output(['node', '-e', code, str(script)], text=True))
-        self.assertEqual(result, {'href': 'http://localhost:7000/', 'requested': []})
+        self.assertEqual(result, {'href': 'http://localhost:7000/', 'requested': [], 'providers': 'http://localhost:7000/static/provider-sync.html'})
 
     def test_registration_preserves_other_extensions_and_is_idempotent(self):
         import src.hermes_component as component

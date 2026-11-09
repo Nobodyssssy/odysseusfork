@@ -1,4 +1,21 @@
+import { resolveReturn } from '/static/js/provider-return.js';
+
 const endpoint = '/api/provider-sync';
+
+(async function setBackLink() {
+  const raw = new URLSearchParams(location.search).get('return');
+  if (!raw) return;
+  let hermesOrigin = null;
+  try {
+    const status = await (await fetch('/api/application-modes/status', { credentials: 'same-origin', signal: AbortSignal.timeout(5000) })).json();
+    if (status && status.enabled && status.url) hermesOrigin = new URL(status.url).origin;
+  } catch (_) { /* the proxied Hermes address and same-origin returns still work */ }
+  const target = resolveReturn(raw, location.origin, location.port, hermesOrigin);
+  if (!target) return;
+  const back = document.getElementById('back');
+  back.href = target.href;
+  back.textContent = target.app === 'hermes' ? 'Back to Hermes' : 'Back to Odysseus';
+})();
 
 const STATUS = {
   connected: 'Connected', requires_authentication: 'Needs authentication', unsupported: 'Not supported',
