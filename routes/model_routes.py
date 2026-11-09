@@ -3136,4 +3136,5 @@ def setup_model_routes(model_discovery):
     router._refresh_state = _refresh_state
     router._refresh_key = _refresh_key
     router._refresh_caches_bg = _refresh_caches_bg
+    router._invalidate_models_cache = _invalidate_models_cache
     return router

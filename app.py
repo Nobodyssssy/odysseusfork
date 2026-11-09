@@ -830,7 +830,14 @@ app.include_router(setup_embedding_routes())
 
 # Models
 from routes.model_routes import setup_model_routes
-app.include_router(setup_model_routes(model_discovery))
+_model_router = setup_model_routes(model_discovery)
+app.include_router(_model_router)
+
+# Shared provider catalog for Odysseus + Hermes (admin-only, loopback-only, additive).
+from routes.provider_sync_routes import make_provider_sync_router
+from src.provider_sync_runtime import create_provider_sync
+app.state.provider_sync = create_provider_sync(invalidate=_model_router._invalidate_models_cache)
+app.include_router(make_provider_sync_router(lambda: app.state.provider_sync))
 
 # GitHub Copilot device-flow login
 from routes.copilot_routes import setup_copilot_routes
