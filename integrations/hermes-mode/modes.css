@@ -15,6 +15,17 @@
   text-decoration: none;
 }
 #odysseus-return-control:focus-visible { outline: 2px solid #d3ac66; }
+#odysseus-providers-link {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 7px 10px;
+  border: 1px solid var(--border, #484848);
+  border-radius: 7px;
+  color: var(--text, #e8e4db);
+  background: var(--bg, #202020);
+  text-decoration: none;
+}
+#odysseus-providers-link:focus-visible { outline: 2px solid #d3ac66; }
 #odysseus-return-status:not(:empty) {
   display: block;
   margin-top: 6px;

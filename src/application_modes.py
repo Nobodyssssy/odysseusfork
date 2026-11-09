@@ -145,16 +145,32 @@ def create_mode_service(environment=None):
         return ModeService(None, 'Hermes setup is unavailable. Run scripts/hermes-component.py repair; Normal Mode remains available.')
 
 
+def require_local(request):
+    """Loopback peer, loopback hostname, no proxy headers."""
+    from fastapi import HTTPException
+    forwarded = any(name in request.headers for name in ('forwarded', 'x-forwarded-for', 'x-forwarded-host', 'x-forwarded-proto', 'x-real-ip'))
+    if forwarded or not request.client or request.client.host not in ('127.0.0.1', '::1') or request.url.hostname not in ('127.0.0.1', 'localhost'):
+        raise HTTPException(403, 'Application modes are local-only')
+
+
+def require_browser_admin(request):
+    """A same-origin action by a direct local browser administrator; never the Agent, an API token or a tool identity."""
+    from fastapi import HTTPException
+    from core.middleware import require_admin
+    require_local(request)
+    origin = f'{request.url.scheme}://{request.url.netloc}'
+    if request.headers.get('origin') != origin:
+        raise HTTPException(403, 'Same-origin browser action required')
+    if getattr(request.state, 'current_user', None) in ('internal-tool', 'api', 'demo', 'system') or 'authorization' in request.headers or 'x-odysseus-internal-token' in request.headers:
+        raise HTTPException(403, 'A direct local browser administrator is required')
+    require_admin(request)
+
+
 def make_router(service):
     from fastapi import APIRouter, HTTPException, Request
-    from core.middleware import require_admin
 
     router = APIRouter(prefix='/api/application-modes', tags=['application-modes'])
-
-    def local_only(request):
-        forwarded = any(name in request.headers for name in ('forwarded', 'x-forwarded-for', 'x-forwarded-host', 'x-forwarded-proto', 'x-real-ip'))
-        if forwarded or not request.client or request.client.host not in ('127.0.0.1', '::1') or request.url.hostname not in ('127.0.0.1', 'localhost'):
-            raise HTTPException(403, 'Application modes are local-only')
+    local_only = require_local
 
     @router.get('')
     def status(request: Request):
@@ -163,13 +179,7 @@ def make_router(service):
 
     @router.post('/hermes/start')
     def start(request: Request):
-        local_only(request)
-        origin = f'{request.url.scheme}://{request.url.netloc}'
-        if request.headers.get('origin') != origin:
-            raise HTTPException(403, 'Same-origin browser action required')
-        if getattr(request.state, 'current_user', None) in ('internal-tool', 'api', 'demo', 'system') or 'authorization' in request.headers or 'x-odysseus-internal-token' in request.headers:
-            raise HTTPException(403, 'A direct local browser administrator is required')
-        require_admin(request)
+        require_browser_admin(request)
         try:
             return service.start()
         except RuntimeError as exc:

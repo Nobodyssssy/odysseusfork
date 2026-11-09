@@ -62,7 +62,12 @@
       link.removeAttribute('aria-disabled');
     }
   });
-  nav.append(link, status);
+  const providers = document.createElement('a');
+  providers.id = 'odysseus-providers-link';
+  providers.textContent = 'Providers';
+  providers.href = new URL('/static/provider-sync.html', target).href;
+  providers.title = 'Shared Odysseus and Hermes providers';
+  nav.append(link, providers, status);
   document.body.append(nav);
   for (let attempt = 0; attempt < 150; attempt++) {
     if (typeof S !== 'undefined' && S._bootReady) {

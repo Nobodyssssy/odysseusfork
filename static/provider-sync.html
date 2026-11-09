@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Shared providers - Odysseus and Hermes</title>
+<link rel="stylesheet" href="/static/css/provider-sync.css">
+</head>
+<body>
+<header>
+  <h1>Shared providers</h1>
+  <p class="lead">One catalog of the providers configured in Odysseus and in Hermes. Nothing is copied unless you turn sharing on for that provider. API keys and logins are never shown or copied; each application keeps its own default model.</p>
+  <div class="toolbar">
+    <button id="refresh" type="button">Refresh providers and models</button>
+    <button id="apply-all" type="button">Add all shared providers</button>
+    <a id="back" href="/">Back to Odysseus</a>
+    <span id="banner" role="status"></span>
+  </div>
+</header>
+<main>
+  <table id="providers" aria-label="Providers">
+    <thead>
+      <tr>
+        <th scope="col">Provider</th>
+        <th scope="col">Source</th>
+        <th scope="col">Models</th>
+        <th scope="col">Odysseus</th>
+        <th scope="col">Hermes</th>
+        <th scope="col">Sync</th>
+        <th scope="col">Share</th>
+        <th scope="col">Actions</th>
+      </tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+  <p id="empty" hidden>No providers found yet.</p>
+  <section class="notes">
+    <h2>What can and cannot be shared</h2>
+    <ul>
+      <li><strong>Shareable:</strong> local OpenAI-compatible servers (llama.cpp, vLLM, LM Studio, Ollama) and keyed cloud endpoints. The provider definition is copied; a key is not.</li>
+      <li><strong>Needs a key on the other side:</strong> a shared cloud provider appears as "Needs authentication" until you enter its key in that application.</li>
+      <li><strong>Never shared:</strong> OAuth and subscription logins (Codex, Copilot, Nous, Claude subscription), which are tied to one application.</li>
+      <li>Removing a provider in one application never removes it in the other, and a provider you remove is not added back unless you turn sharing on again.</li>
+    </ul>
+  </section>
+</main>
+<script type="module" src="/static/js/provider-sync.js"></script>
+</body>
+</html>

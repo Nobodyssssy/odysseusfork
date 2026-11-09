@@ -103,7 +103,13 @@ async function initialize() {
   const message = document.createElement('span');
   message.id = 'application-mode-status';
   message.setAttribute('role', 'status');
-  bar.append(selector, message);
+  const providers = document.createElement('a');
+  providers.id = 'application-mode-providers';
+  providers.href = '/static/provider-sync.html';
+  providers.textContent = 'Providers';
+  providers.title = 'Shared Odysseus and Hermes providers';
+  providers.style.cssText = 'margin-left:8px;color:inherit';
+  bar.append(selector, providers, message);
   document.querySelector('#chat-container').prepend(bar);
   try { await restoreChatState(message); }
   catch (_) { message.textContent = 'The saved draft could not be restored. Your current composer was not changed.'; }

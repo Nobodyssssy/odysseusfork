@@ -97,6 +97,7 @@ def main():
     parser.add_argument('--hermes-repo', required=True, type=Path)
     parser.add_argument('--port', type=int, default=17000)
     parser.add_argument('--hermes-port', type=int, default=18790)
+    parser.add_argument('--hermes-python', type=Path, help='Hermes interpreter (round-trip YAML) for the provider-sync config writer')
     parser.add_argument('--no-browser', action='store_true')
     args = parser.parse_args()
     if not (1024 <= args.port <= 65535 and 1024 <= args.hermes_port <= 65535) or args.port == args.hermes_port:
@@ -115,6 +116,14 @@ def main():
     shutil.copytree(ROOT / 'integrations/hermes-mode', extensions, dirs_exist_ok=True)
     odysseus_url = f'http://127.0.0.1:{args.port}/'
     hermes_url = f'http://127.0.0.1:{args.hermes_port}/'
+    # Isolated component root: provider sync must never read or write the live component state.
+    component_root = state / 'component'
+    if args.hermes_python:
+        (component_root / 'managed').mkdir(parents=True, exist_ok=True)
+        (component_root / 'managed/component.json').write_text(json.dumps({
+            'version': 1, 'enabled': True, 'origin': 'external', 'url': hermes_url, 'return_url': odysseus_url,
+            'python': str(args.hermes_python.resolve()), 'home': str(state / 'hermes'), 'state_dir': str(state / 'hermes/webui'),
+            'webui': str(repo), 'agent': str(Path(os.environ.get('LOCALAPPDATA', '')) / 'hermes/hermes-agent')}), encoding='utf-8')
     (extensions / 'connection.json').write_text(json.dumps({'odysseus_url': odysseus_url, 'hermes_url': hermes_url}), encoding='utf-8')
     environment = dict(os.environ)
     environment.update({
@@ -128,6 +137,7 @@ def main():
         'ODYSSEUS_STARTUP_WARMUPS': '0', 'ODYSSEUS_MODEL_KEEPALIVE': '0',
         'CLEANUP_ENABLED': 'false', 'PYTHONDONTWRITEBYTECODE': '1',
         'ODYSSEUS_HERMES_MODE_URL': hermes_url,
+        'ODYSSEUS_HERMES_COMPONENT_ROOT': str(component_root),
         'ODYSSEUS_HERMES_ALLOW_START': '1',
         'ODYSSEUS_HERMES_REPO': str(repo),
         'ODYSSEUS_HERMES_HOME': str(state / 'hermes'),
