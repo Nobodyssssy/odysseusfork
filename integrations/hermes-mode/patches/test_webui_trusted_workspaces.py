@@ -167,3 +167,37 @@ def test_corrupt_state_is_kept_and_never_grants_anything(world):
     tw.init()
     assert not tw.status()['always']
     assert (world.home / 'vault' / 'webui-trusted-workspaces.corrupt').exists()
+
+
+def shadowing_imports(source, functions=('handle_get', 'handle_post')):
+    """(function, line, name) for each function-local import that rebinds a module-level name."""
+    import ast
+    tree = ast.parse(source)
+    module_names = {a.asname or a.name.split('.')[0] for n in tree.body if isinstance(n, (ast.Import, ast.ImportFrom)) for a in n.names}
+    found = []
+    for func in tree.body:
+        if isinstance(func, ast.FunctionDef) and func.name in functions:
+            for node in ast.walk(func):
+                if isinstance(node, (ast.Import, ast.ImportFrom)):
+                    found += [(func.name, node.lineno, a.asname or a.name.split('.')[0]) for a in node.names
+                              if (a.asname or a.name.split('.')[0]) in module_names]
+    return found
+
+
+def test_route_handlers_do_not_shadow_module_imports_with_local_imports():
+    """A function-local `from x import name` makes `name` local for the WHOLE function, breaking every earlier use
+    (this once turned GET /api/sessions into HTTP 500 via parse_qs)."""
+    source = (Path(__file__).resolve().parents[1] / 'api' / 'routes.py').read_text(encoding='utf-8')
+    upstream_baseline = {'quote', 'get_active_profile_name', '_re'}   # already present at the pinned WebUI revision
+    assert [f for f in shadowing_imports(source) if f[2] not in upstream_baseline] == []
+
+
+def test_the_guard_detects_the_original_bug():
+    bad = (
+        "from urllib.parse import parse_qs",
+        "",
+        "def handle_get():",
+        "    parse_qs('a')",
+        "    from urllib.parse import parse_qs",
+    )
+    assert shadowing_imports(chr(10).join(bad) + chr(10)) == [('handle_get', 5, 'parse_qs')]

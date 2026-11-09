@@ -1,8 +1,8 @@
 diff --git a/api/routes.py b/api/routes.py
-index 017650278..a39882316 100644
+index 017650278..7cf4d6434 100644
 --- a/api/routes.py
 +++ b/api/routes.py
-@@ -18269,6 +18269,15 @@ def handle_get(handler, parsed) -> bool:
+@@ -18269,6 +18269,14 @@ def handle_get(handler, parsed) -> bool:
      if parsed.path == "/api/session/export":
          return _handle_session_export(handler, parsed)
  
@@ -12,13 +12,12 @@ index 017650278..a39882316 100644
 +
 +    if parsed.path == "/api/trusted-workspaces/check":
 +        from api import trusted_workspaces
-+        from urllib.parse import parse_qs
 +        return j(handler, trusted_workspaces.check((parse_qs(parsed.query).get("path") or [""])[0]))
 +
      if parsed.path == "/api/workspaces":
          from api.profiles import get_active_profile_name
          active_profile = get_active_profile_name()
-@@ -21531,6 +21540,18 @@ def handle_post(handler, parsed) -> bool:
+@@ -21531,6 +21539,18 @@ def handle_post(handler, parsed) -> bool:
      if parsed.path == "/api/file/open-vscode":
          return _handle_file_open_vscode(handler, body)
  

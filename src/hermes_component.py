@@ -43,7 +43,7 @@ _PATCHES = {'webui': 'integrations/hermes-mode/patches/webui-trusted-workspaces.
 
 def patch_file(application_root, name):
     relative = _PATCHES.get(name)
-    path = Path(application_root) / relative if relative else None
+    path = (Path(application_root) / relative).resolve() if relative else None
     return path if path and path.is_file() else None
 
 
