@@ -176,7 +176,9 @@ def build_catalog(odysseus, hermes, state=None):
 def sync_status(identity, od, he, portable, opted_in, state):
     if not portable:
         reason = (od or he)
-        return 'not_shareable_credential' if reason.auth == AUTH_OAUTH else 'not_shareable'
+        if reason.auth == AUTH_OAUTH:
+            return 'not_shareable_credential'
+        return 'not_shareable_protocol' if reason.reason == 'plugin' else 'not_shareable'
     if od and he:
         return 'in_sync' if od.definition_fingerprint() == he.definition_fingerprint() or set(od.models) == set(he.models) else 'models_differ'
     missing = 'hermes' if od else 'odysseus'

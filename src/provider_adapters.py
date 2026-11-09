@@ -18,6 +18,8 @@ KNOWN_OPENAI_COMPATIBLE = {
     'fireworks': 'https://api.fireworks.ai/inference/v1',
     'deepinfra': 'https://api.deepinfra.com/v1/openai',
     'nvidia': 'https://integrate.api.nvidia.com/v1',
+    'opencode-zen': 'https://opencode.ai/zen/v1',        # from the Agent's own provider registry (hermes_cli/auth.py)
+    'opencode-go': 'https://opencode.ai/zen/go/v1',
 }
 _MAX_BODY = 262144
 _MAX_CONFIG = 8 * 1024 * 1024
@@ -135,7 +137,8 @@ def hermes_entries(providers_payload, config_urls=None):
             base_url=redact_url(base or KNOWN_OPENAI_COMPATIBLE.get(pid, '')) if (base or pid in KNOWN_OPENAI_COMPATIBLE) else None,
             canonical=canonical, models=model_ids(item.get('models')), auth=auth,
             has_credential=has_key, enabled=True,
-            reason='auth_error' if item.get('auth_error') else '', self_hosted=self_hosted,
+            reason='auth_error' if item.get('auth_error') else ('plugin' if item.get('is_plugin_provider') and not base and pid not in KNOWN_OPENAI_COMPATIBLE else ''),
+            self_hosted=self_hosted,
         ))
     return entries
 

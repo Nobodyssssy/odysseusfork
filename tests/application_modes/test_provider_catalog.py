@@ -170,6 +170,22 @@ class CatalogTests(unittest.TestCase):
             self.assertEqual(read_hermes_provider_urls(path), {})
 
 
+    def test_hermes_built_in_keyed_providers_are_shareable_and_solstice_style_plugins_are_not(self):
+        zen = hermes_item(id='opencode-zen', display_name='OpenCode Zen', has_key=True, is_self_hosted=False, is_custom=False,
+                          base_url=None, models=[{'id': 'm1'}, {'id': 'm2'}])
+        plugin = hermes_item(id='solstice', display_name='Solstice', has_key=True, is_self_hosted=False, is_plugin_provider=True,
+                             base_url=None, models=[{'id': 's1'}])
+        entries = hermes_entries(hermes_payload(zen, plugin))
+        by_id = {e.native_id: e for e in entries}
+        self.assertEqual(by_id['opencode-zen'].canonical, 'https://opencode.ai/zen/v1')
+        self.assertTrue(by_id['opencode-zen'].portable)
+        self.assertFalse(by_id['solstice'].portable)
+        catalog = {r['name']: r for r in build_catalog([], entries, SyncState())}
+        self.assertEqual(catalog['OpenCode Zen']['sync'], 'sharing_off')
+        self.assertEqual(catalog['Solstice']['sync'], 'not_shareable_protocol')
+        self.assertNotIn(SECRET, json.dumps(catalog))
+
+
 class ProbeTests(unittest.TestCase):
     def setUp(self):
         FakeModels.seen_auth = []

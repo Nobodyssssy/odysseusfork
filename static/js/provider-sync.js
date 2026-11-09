@@ -8,7 +8,7 @@ const SYNC = {
   in_sync: 'In sync', models_differ: 'Model lists differ', sharing_off: 'Sharing off',
   pending_hermes: 'Waiting to be added to Hermes', pending_odysseus: 'Waiting to be added to Odysseus',
   deleted_on_hermes: 'Removed in Hermes (not re-added)', deleted_on_odysseus: 'Removed in Odysseus (not re-added)',
-  not_shareable: 'Not shareable', not_shareable_credential: 'Login-based: cannot be shared',
+  not_shareable: 'Not shareable', not_shareable_protocol: 'Own protocol: not OpenAI-compatible', not_shareable_credential: 'Login-based: cannot be shared',
 };
 const SOURCE = { odysseus: 'Odysseus', hermes: 'Hermes', both: 'Both' };
 
