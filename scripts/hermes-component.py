@@ -13,9 +13,31 @@ from src.hermes_component_runtime import discover_existing, operator_environment
 from src.runtime_paths import get_hermes_component_root
 
 
+def maintain(manager, config, args, environment):
+    """Install-or-update entry point used by the Windows launcher. Idempotent; never touches Hermes user data.
+
+    * Nothing installed: adopt a compatible existing Hermes, else provision a managed one.
+    * Installed but pins changed (an Odysseus update): re-provision only a managed install, side by side.
+    * Always: apply the reviewed WebUI patch to a clean pinned checkout and refresh the return extension.
+    An adopted (user-owned) install that differs from the pins is reported, never modified.
+    """
+    if config and not config['enabled']:
+        return {'enabled': False, 'state': 'disabled'}
+    existing = None
+    if not config:
+        existing = discover_existing(APP_ROOT, environment, args.webui, args.agent, args.home, args.python, args.state_dir)
+    try:
+        config = manager.ensure(existing=existing)
+    except ComponentError:
+        if not config or config.get('origin') != 'managed':
+            raise
+        config = manager.ensure(repair=True)
+    return manager.refresh_extension() if config.get('enabled') else config
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=('ensure', 'repair', 'disable', 'enable', 'status', 'serve', 'plan', 'refresh'))
+    parser.add_argument('action', choices=('ensure', 'repair', 'disable', 'enable', 'status', 'serve', 'plan', 'refresh', 'maintain'))
     parser.add_argument('--root', type=Path)
     parser.add_argument('--fresh', action='store_true', help='New isolated install only; never reinitializes saved state')
     parser.add_argument('--webui', type=Path)
@@ -54,6 +76,8 @@ def main(argv=None):
             return serve_component(root, APP_ROOT, environment)
         elif args.action == 'refresh':
             payload = manager.refresh_extension()
+        elif args.action == 'maintain':
+            payload = maintain(manager, config, args, environment)
         else:
             existing = None
             if (not config or args.action == 'plan') and not args.fresh:

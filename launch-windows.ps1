@@ -20,7 +20,10 @@ param(
     [string]$BindHost = "127.0.0.1",
     # Skip the local ChromaDB server (vector memory and RAG stay degraded
     # unless CHROMADB_HOST points at a server you run yourself).
-    [switch]$NoChroma
+    [switch]$NoChroma,
+
+    # Skip installing / updating the optional Hermes Mode component.
+    [switch]$NoHermes
 )
 
 $ErrorActionPreference = "Stop"
@@ -145,6 +148,17 @@ if ($LASTEXITCODE -ne 0) { Fail "Dependency install failed. Scroll up for the pi
 Write-Step "Running first-time setup"
 & $venvPy setup.py
 if ($LASTEXITCODE -ne 0) { Fail "setup.py failed." }
+
+# 4b. Hermes Mode: reuse a compatible Hermes when present, otherwise provision
+# the pinned Agent + WebUI into a private per-user directory; then keep it in
+# step with this Odysseus version. Never overwrites Hermes data, never fatal.
+if (-not $NoHermes -and -not $env:ODYSSEUS_SKIP_HERMES) {
+    Write-Step "Preparing Hermes Mode (first install can take several minutes)"
+    & $venvPy scripts\hermes-component.py maintain
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "WARNING: Hermes Mode was not set up. Normal Mode is unaffected; re-run to retry, or use -NoHermes." -ForegroundColor Yellow
+    }
+}
 
 # 5. Local ChromaDB server for vector memory + document RAG.
 # Docker Compose runs ChromaDB next to the app; a native install has nothing

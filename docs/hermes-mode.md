@@ -1,4 +1,4 @@
-# Hermes Mode — draft Windows component integration
+# Hermes Mode — Windows component integration
 
 **Status: development draft, not a production release.** This branch preserves the existing Windows-fork base and does not include the separate Trusted Workspaces implementation. Do not merge it into a live installation yet.
 
@@ -69,3 +69,16 @@ When Hermes mode is configured, Odysseus serves the complete Hermes WebUI on its
 Known limits: Hermes has its own authentication, which is off unless you set `HERMES_WEBUI_PASSWORD`; the proxy does not add any. Hermes still writes a finished chat to disk about a second after the reply, so a hard kill inside that window loses it (unchanged by the proxy). Only Chromium (Edge) was automated; Windows resolves `hermes.localhost` natively.
 
 Existing installs need `scripts/hermes-component.py refresh` once to install the updated return extension. It changes only that extension package and the component config, and restarts nothing.
+
+## Install and update (Windows)
+
+`launch-windows.ps1` runs `scripts/hermes-component.py maintain` after Odysseus's own setup (skip with `-NoHermes` or `ODYSSEUS_SKIP_HERMES=1`; failure is a warning and never blocks Odysseus):
+
+- **Nothing installed:** a compatible Hermes already on the machine is adopted in place (never copied or modified); otherwise the pinned Agent and WebUI (`config/hermes-component.lock.json`) are cloned into a private per-user directory and built there.
+- **Installed:** the checkout is verified, the reviewed WebUI patch (Trusted Workspaces) is applied if it is not already, and the return extension is refreshed. Re-running is a no-op.
+- **After an Odysseus update that changes the pins:** only an Odysseus-managed install is re-provisioned, side by side; Hermes data (`home`, `state_dir`) is reused and never overwritten. A user-owned (adopted) install that differs from the pins is reported, not modified.
+- Hermes Mode starts Hermes itself from the mode selector, so no separate PowerShell command is needed, and it survives a Windows restart because Odysseus (started by your AutoStart task) starts it on demand.
+- Hermes data, credentials and `HERMES_WRITE_SAFE_ROOT` are never written by the installer.
+
+See also `docs/provider-sharing.md` and `docs/trusted-workspaces.md`.
+

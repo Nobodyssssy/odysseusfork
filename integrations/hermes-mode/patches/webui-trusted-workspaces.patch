@@ -1,0 +1,518 @@
+diff --git a/api/routes.py b/api/routes.py
+index 017650278..a39882316 100644
+--- a/api/routes.py
++++ b/api/routes.py
+@@ -18269,6 +18269,15 @@ def handle_get(handler, parsed) -> bool:
+     if parsed.path == "/api/session/export":
+         return _handle_session_export(handler, parsed)
+ 
++    if parsed.path == "/api/trusted-workspaces":
++        from api import trusted_workspaces
++        return j(handler, trusted_workspaces.status())
++
++    if parsed.path == "/api/trusted-workspaces/check":
++        from api import trusted_workspaces
++        from urllib.parse import parse_qs
++        return j(handler, trusted_workspaces.check((parse_qs(parsed.query).get("path") or [""])[0]))
++
+     if parsed.path == "/api/workspaces":
+         from api.profiles import get_active_profile_name
+         active_profile = get_active_profile_name()
+@@ -21531,6 +21540,18 @@ def handle_post(handler, parsed) -> bool:
+     if parsed.path == "/api/file/open-vscode":
+         return _handle_file_open_vscode(handler, body)
+ 
++    # ── Trusted Workspaces (POST): only a real browser interaction may approve or revoke ──
++    if parsed.path in ("/api/trusted-workspaces/approve", "/api/trusted-workspaces/revoke"):
++        from api import trusted_workspaces
++        if not _check_same_origin_browser_request(handler, require_provenance=True):
++            return bad(handler, "Folder permissions can only be changed from the Hermes page in your browser.", 403)
++        try:
++            if parsed.path.endswith("/approve"):
++                return j(handler, trusted_workspaces.approve(str(body.get("path") or ""), str(body.get("mode") or "")))
++            return j(handler, trusted_workspaces.revoke(str(body.get("path") or "")))
++        except trusted_workspaces.WorkspaceError as exc:
++            return bad(handler, str(exc), 400)
++
+     # ── Workspace management (POST) ──
+     if parsed.path == "/api/workspaces/add":
+         return _handle_workspace_add(handler, body)
+diff --git a/api/trusted_workspaces.py b/api/trusted_workspaces.py
+new file mode 100644
+index 000000000..14a10af7f
+--- /dev/null
++++ b/api/trusted_workspaces.py
+@@ -0,0 +1,270 @@
++"""Trusted Workspaces: folders the user has approved for the Agent's file tools.
++
++How it works
++------------
++The Agent's file tools already refuse writes outside ``HERMES_WRITE_SAFE_ROOT`` and re-read that
++variable on every operation. Agent runs execute inside this process, so this module keeps the
++variable equal to *the roots configured at launch* plus *the folders the user approved*. An approval or
++revocation therefore takes effect on the next file operation, including in a run that is already active.
++No restart and no change to the Agent are needed.
++
++What it is not
++--------------
++This is a permission for Hermes's *file tools*. It is NOT an operating-system sandbox: the terminal tool,
++other programs and anything else running as your Windows account are unaffected. A model with a shell can
++still reach any file you can. Approvals are made by the browser dialog (a same-origin request carrying
++browser provenance headers); the Agent has no tool that approves a folder. A process running as you that
++forges those headers can still approve; defending against that needs a separate Windows account, which this
++feature deliberately does not install.
++
++Rules
++-----
++* Launch-time roots are preserved and cannot be revoked here.
++* An empty list is never "unrestricted": with nothing approved the variable points at an empty private directory.
++* The feature is inactive (nothing changes) unless ``HERMES_WRITE_SAFE_ROOT`` is already set or
++  ``HERMES_WEBUI_TRUSTED_WORKSPACES=1``.
++* Approvals bind the folder's identity (volume + file id). A folder replaced by a junction or another
++  directory is dropped from the effective roots until it is approved again.
++* Drive roots, the home folder, Hermes's own home (and anything containing it), system folders, UNC and
++  NT-namespace paths are refused.
++"""
++import json
++import logging
++import os
++from pathlib import Path
++import threading
++import time
++
++logger = logging.getLogger(__name__)
++
++ENV = 'HERMES_WRITE_SAFE_ROOT'
++ENABLE_ENV = 'HERMES_WEBUI_TRUSTED_WORKSPACES'
++_LOCK = threading.RLock()
++_BASE = None            # launch-time roots, captured once and never fed back
++_ENABLED = False
++_ONCE = {}              # canonical path -> identity; lives for this process only
++_STATE_FILE = None
++_EMPTY_DIR = None
++
++
++class WorkspaceError(ValueError):
++    pass
++
++
++def _norm(path):
++    return os.path.normcase(os.path.realpath(path))
++
++
++def _is_under(path, root):
++    path, root = _norm(path), _norm(root)
++    return path == root or path.startswith(root.rstrip('\\/') + os.sep)
++
++
++def _identity(path):
++    info = os.stat(path)
++    return [int(info.st_dev), int(info.st_ino)]
++
++
++def _hermes_home():
++    try:
++        from api.profiles import get_active_hermes_home
++        return Path(get_active_hermes_home())
++    except Exception:
++        return Path(os.environ.get('HERMES_HOME') or Path.home() / '.hermes')
++
++
++def _forbidden_ancestors():
++    """A folder equal to or containing any of these may not be approved."""
++    home = Path.home()
++    items = [_hermes_home(), home]
++    for name in ('SystemRoot', 'windir', 'ProgramFiles', 'ProgramFiles(x86)', 'ProgramData'):
++        if os.environ.get(name):
++            items.append(Path(os.environ[name]))
++    return items
++
++
++def canonicalize(path):
++    """Return the canonical real directory for ``path`` or raise WorkspaceError with a user-facing reason."""
++    if not isinstance(path, str) or not path.strip() or '\x00' in path or len(path) > 1024:
++        raise WorkspaceError('Choose a folder.')
++    raw = path.strip().strip('"').strip("'")
++    if raw.startswith(('\\\\?\\', '\\\\.\\', '//?/', '//./')) or raw.startswith(('\\\\', '//')):
++        raise WorkspaceError('Network and device paths cannot be approved.')
++    if not os.path.isabs(raw):
++        raise WorkspaceError('Use a full folder path, for example F:\\Project.')
++    try:
++        real = os.path.realpath(raw)
++    except (OSError, ValueError) as exc:
++        raise WorkspaceError('That folder could not be resolved.') from exc
++    if not os.path.isdir(real):
++        raise WorkspaceError('That folder does not exist.')
++    if os.path.dirname(real.rstrip('\\/')) == real.rstrip('\\/') or os.path.splitdrive(real)[1] in ('', '\\', '/'):
++        raise WorkspaceError('A whole drive cannot be approved. Choose a project folder.')
++    try:
++        if _is_under(real, _hermes_home()):
++            raise WorkspaceError('Hermes\'s own data folder cannot be approved.')
++    except OSError:
++        pass
++    for protected in _forbidden_ancestors():
++        try:
++            if _is_under(protected, real):
++                raise WorkspaceError('That folder contains system, account or Hermes data and cannot be approved.')
++        except OSError:
++            continue
++    try:
++        from api.workspace import _is_blocked_system_path
++        if _is_blocked_system_path(Path(real)):
++            raise WorkspaceError('That is a system folder and cannot be approved.')
++    except ImportError:
++        pass
++    return real
++
++
++def _read_state():
++    try:
++        data = json.loads(_STATE_FILE.read_text(encoding='utf-8')) if _STATE_FILE and _STATE_FILE.exists() else {}
++    except (OSError, ValueError):
++        if _STATE_FILE and _STATE_FILE.exists():
++            try:
++                _STATE_FILE.replace(_STATE_FILE.with_suffix('.corrupt'))   # keep what could not be read
++            except OSError:
++                pass
++        return {'version': 1, 'always': []}
++    items = data.get('always') if isinstance(data, dict) and data.get('version') == 1 else []
++    clean = [i for i in (items or []) if isinstance(i, dict) and isinstance(i.get('path'), str) and isinstance(i.get('id'), list)]
++    return {'version': 1, 'always': clean}
++
++
++def _write_state(state):
++    _STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
++    temporary = _STATE_FILE.with_name(_STATE_FILE.name + '.tmp')
++    temporary.write_text(json.dumps(state, indent=2), encoding='utf-8')
++    os.replace(temporary, _STATE_FILE)
++
++
++def _live_roots():
++    """(roots that currently count, stale entries) from always + once, verifying identity."""
++    roots, stale = [], []
++    for entry in _read_state()['always']:
++        try:
++            ok = os.path.isdir(entry['path']) and _identity(entry['path']) == entry['id']
++        except OSError:
++            ok = False
++        (roots if ok else stale).append(entry['path'])
++    for path, ident in list(_ONCE.items()):
++        try:
++            if os.path.isdir(path) and _identity(path) == ident:
++                roots.append(path)
++                continue
++        except OSError:
++            pass
++        _ONCE.pop(path, None)
++    return roots, stale
++
++
++def _apply():
++    """Make the live variable equal base + approvals. Never writes an empty value."""
++    roots, _ = _live_roots()
++    effective = list(dict.fromkeys([*(_BASE or ()), *roots]))
++    if not effective:
++        _EMPTY_DIR.mkdir(parents=True, exist_ok=True)
++        effective = [str(_EMPTY_DIR)]
++    os.environ[ENV] = os.pathsep.join(effective)
++
++
++def init(state_dir=None):
++    """Capture launch-time roots and apply saved approvals. Call once at WebUI startup."""
++    global _BASE, _ENABLED, _STATE_FILE, _EMPTY_DIR
++    with _LOCK:
++        launch = [p for p in os.environ.get(ENV, '').split(os.pathsep) if p.strip()]
++        _ENABLED = bool(launch) or os.environ.get(ENABLE_ENV, '').strip().lower() in ('1', 'true', 'yes', 'on')
++        home = _hermes_home()
++        # `vault` is a protected sub-path for the Agent's file tools, so the approvals list is not writable by them.
++        _STATE_FILE = home / 'vault' / 'webui-trusted-workspaces.json'
++        _EMPTY_DIR = home / 'vault' / 'webui-trusted-workspaces-empty'
++        _BASE = tuple(launch)
++        _ONCE.clear()
++        if _ENABLED:
++            _apply()
++            logger.info('Trusted Workspaces active: %d launch root(s), %d saved approval(s)', len(_BASE), len(_read_state()['always']))
++        return _ENABLED
++
++
++def enabled():
++    return _ENABLED
++
++
++def is_trusted(path):
++    """True when writes to ``path`` are currently allowed (always true while the feature is inactive)."""
++    with _LOCK:
++        if not _ENABLED:
++            return True
++        try:
++            roots, _ = _live_roots()
++            return any(_is_under(path, r) for r in [*(_BASE or ()), *roots])
++        except OSError:
++            return False
++
++
++def check(path):
++    try:
++        canonical = canonicalize(path)
++    except WorkspaceError as exc:
++        return {'enabled': _ENABLED, 'trusted': False, 'canonical': None, 'error': str(exc)}
++    return {'enabled': _ENABLED, 'trusted': is_trusted(canonical), 'canonical': canonical, 'error': None}
++
++
++def status():
++    with _LOCK:
++        roots, stale = _live_roots() if _ENABLED else ([], [])
++        saved = {os.path.normcase(e['path']): e for e in _read_state()['always']} if _ENABLED else {}
++        return {
++            'enabled': _ENABLED,
++            'configured': list(_BASE or ()),
++            'always': [{'path': e['path'], 'added': e.get('added'), 'active': e['path'] in roots} for e in saved.values()],
++            'once': sorted(_ONCE),
++            'stale': stale,
++            'note': 'Controls Hermes file tools only. It is not an operating-system sandbox.',
++        }
++
++
++def approve(path, mode):
++    if mode not in ('once', 'always'):
++        raise WorkspaceError('Choose Allow once or Always allow.')
++    with _LOCK:
++        if not _ENABLED:
++            raise WorkspaceError('Trusted Workspaces is not active for this Hermes.')
++        canonical = canonicalize(path)
++        if any(_is_under(canonical, r) for r in (_BASE or ())):
++            return {'result': 'already_configured', 'path': canonical}
++        ident = _identity(canonical)
++        if mode == 'once':
++            _ONCE[canonical] = ident
++        else:
++            state = _read_state()
++            state['always'] = [e for e in state['always'] if _norm(e['path']) != _norm(canonical)]
++            state['always'].append({'path': canonical, 'id': ident, 'added': time.strftime('%Y-%m-%dT%H:%M:%S')})
++            _write_state(state)
++        _apply()
++        return {'result': mode, 'path': canonical}
++
++
++def revoke(path):
++    with _LOCK:
++        if not _ENABLED:
++            raise WorkspaceError('Trusted Workspaces is not active for this Hermes.')
++        target = os.path.normcase(os.path.realpath(path)) if isinstance(path, str) else ''
++        if any(os.path.normcase(os.path.realpath(r)) == target for r in (_BASE or ())):
++            raise WorkspaceError('This folder is configured when Hermes starts (HERMES_WRITE_SAFE_ROOT) and cannot be revoked here.')
++        removed = False
++        state = _read_state()
++        kept = [e for e in state['always'] if os.path.normcase(os.path.realpath(e['path'])) != target]
++        if len(kept) != len(state['always']):
++            removed = True
++            state['always'] = kept
++            _write_state(state)
++        for key in [k for k in _ONCE if os.path.normcase(os.path.realpath(k)) == target]:
++            _ONCE.pop(key)
++            removed = True
++        _apply()
++        return {'result': 'revoked' if removed else 'not_found', 'path': path}
+diff --git a/server.py b/server.py
+index adff2c140..332f42bd6 100644
+--- a/server.py
++++ b/server.py
+@@ -582,6 +582,13 @@ def main() -> None:
+ 
+     fix_credential_permissions()
+ 
++    try:
++        from api import trusted_workspaces
++        if trusted_workspaces.init():
++            print("[ok] Trusted Workspaces active (file-tool permission, not an OS sandbox)", flush=True)
++    except Exception as exc:  # a failure here must never stop Hermes, but never fail open either
++        print(f"[!!] Trusted Workspaces could not start: {exc}", flush=True)
++
+     try:
+         from api.models import _active_state_db_path
+         from api.session_recovery import recover_all_sessions_on_startup
+diff --git a/static/index.html b/static/index.html
+index 902b2843e..37a764982 100644
+--- a/static/index.html
++++ b/static/index.html
+@@ -1854,6 +1854,7 @@
+ <script src="static/a11y-helpers.js?v=__WEBUI_VERSION__" defer></script>
+ <script src="static/ui.js?v=__WEBUI_VERSION__" defer></script>
+ <script src="static/workspace.js?v=__WEBUI_VERSION__" defer></script>
++<script src="static/trusted-workspaces.js?v=__WEBUI_VERSION__" defer></script>
+ <script src="static/terminal.js?v=__WEBUI_VERSION__" defer></script>
+ <script src="static/sessions.js?v=__WEBUI_VERSION__" defer></script>
+ <script src="static/commands.js?v=__WEBUI_VERSION__" defer></script>
+diff --git a/static/trusted-workspaces.js b/static/trusted-workspaces.js
+new file mode 100644
+index 000000000..13e29b215
+--- /dev/null
++++ b/static/trusted-workspaces.js
+@@ -0,0 +1,167 @@
++/* Trusted Workspaces: asks before Hermes's file tools may write in a newly chosen folder.
++ * A permission for Hermes's file tools only; it is not an operating-system sandbox.
++ * Approvals are made only from a click in this dialog. */
++(function () {
++  'use strict';
++  const nativeFetch = window.fetch.bind(window);
++  const GATED = /\/api\/(session\/new|session\/update|workspaces\/add)$/;
++  const api = path => new URL(path, document.baseURI).href;
++  let enabled = null;
++  const pending = new Map();
++  let queue = Promise.resolve();
++
++  async function json(path, init) {
++    const response = await nativeFetch(api(path), { credentials: 'include', headers: { 'Content-Type': 'application/json' }, ...init });
++    let data = {};
++    try { data = await response.json(); } catch (_) { /* non-JSON */ }
++    return { ok: response.ok, status: response.status, data };
++  }
++
++  const ready = json('api/trusted-workspaces').then(r => { enabled = r.ok && r.data.enabled === true; }).catch(() => { enabled = false; });
++
++  function el(tag, props, ...children) {
++    const node = Object.assign(document.createElement(tag), props || {});
++    node.append(...children);
++    return node;
++  }
++
++  function askUser(canonical) {
++    return new Promise(resolve => {
++      const previous = document.activeElement;
++      const overlay = el('div', { id: 'trusted-workspaces-overlay' });
++      overlay.style.cssText = 'position:fixed;inset:0;z-index:100000;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;font:14px system-ui,sans-serif';
++      const box = el('div', { role: 'alertdialog' });
++      box.setAttribute('aria-modal', 'true');
++      box.setAttribute('aria-labelledby', 'tw-title');
++      box.setAttribute('aria-describedby', 'tw-body');
++      box.style.cssText = 'max-width:560px;width:calc(100% - 32px);background:var(--bg,#1f2124);color:var(--text,#e8e4db);border:1px solid var(--border,#484848);border-radius:10px;padding:20px;box-shadow:0 10px 40px rgba(0,0,0,.5)';
++      const path = el('code', { textContent: canonical });
++      path.style.cssText = 'display:block;margin:10px 0;padding:8px 10px;border-radius:6px;background:rgba(127,127,127,.18);word-break:break-all;user-select:all';
++      const status = el('div', { id: 'tw-status', role: 'status' });
++      const button = (label, mode, primary) => {
++        const b = el('button', { type: 'button', textContent: label });
++        b.style.cssText = 'padding:8px 14px;border-radius:7px;border:1px solid var(--border,#484848);background:' + (primary ? '#2d6a4f' : 'transparent') + ';color:inherit;cursor:pointer;font:inherit';
++        b.dataset.mode = mode;
++        return b;
++      };
++      const deny = button('Deny', 'deny');
++      const once = button('Allow once', 'once');
++      const always = button('Always allow', 'always', true);
++      const buttons = el('div', {}, deny, once, always);
++      buttons.style.cssText = 'display:flex;gap:8px;justify-content:flex-end;margin-top:14px';
++      box.append(
++        el('h2', { id: 'tw-title', textContent: 'Allow Hermes to write in this folder?' }),
++        el('div', { id: 'tw-body', textContent: 'Hermes\'s file tools will be able to create and change files in this folder and everything inside it:' }),
++        path,
++        el('div', { textContent: 'This controls Hermes\'s file tools only. It is not an operating-system sandbox. Allow once lasts until Hermes restarts; Always allow is remembered and can be revoked from "Trusted folders".' }),
++        status, buttons);
++      box.querySelector('#tw-title').style.cssText = 'margin:0 0 8px;font-size:17px';
++      overlay.append(box);
++      document.body.append(overlay);
++      deny.focus();
++
++      const close = result => { overlay.remove(); document.removeEventListener('keydown', onKey, true); if (previous && previous.focus) previous.focus(); resolve(result); };
++      const onKey = event => {
++        if (event.key === 'Escape') { event.preventDefault(); close({ ok: false, message: 'Folder not allowed.' }); }
++        if (event.key === 'Tab') {
++          const items = [deny, once, always];
++          const index = items.indexOf(document.activeElement);
++          event.preventDefault();
++          items[(index + (event.shiftKey ? items.length - 1 : 1)) % items.length].focus();
++        }
++      };
++      document.addEventListener('keydown', onKey, true);
++      deny.addEventListener('click', () => close({ ok: false, message: 'Folder not allowed.' }));
++      for (const choice of [once, always]) {
++        choice.addEventListener('click', async event => {
++          if (!event.isTrusted) return;      // only a real click can approve
++          for (const b of [deny, once, always]) b.disabled = true;
++          const r = await json('api/trusted-workspaces/approve', { method: 'POST', body: JSON.stringify({ path: canonical, mode: choice.dataset.mode }) });
++          if (r.ok) return close({ ok: true });
++          status.textContent = r.data.error || 'The folder could not be approved.';
++          for (const b of [deny, once, always]) b.disabled = false;
++          deny.focus();
++        });
++      }
++    });
++  }
++
++  function ensureTrusted(path) {
++    return ready.then(async () => {
++      if (!enabled) return { ok: true };
++      const check = await json('api/trusted-workspaces/check?path=' + encodeURIComponent(path));
++      if (!check.ok || check.data.error || check.data.trusted) return { ok: true };   // invalid paths are reported by the normal route
++      const key = check.data.canonical;
++      if (!pending.has(key)) {
++        const run = queue.then(() => askUser(key)).finally(() => pending.delete(key));
++        queue = run.catch(() => {});
++        pending.set(key, run);
++      }
++      return pending.get(key);
++    }).catch(() => ({ ok: true }));
++  }
++
++  window.fetch = async function (input, init) {
++    try {
++      const url = typeof input === 'string' ? input : (input && input.url) || '';
++      const method = String((init && init.method) || (input && input.method) || 'GET').toUpperCase();
++      if (method === 'POST' && init && typeof init.body === 'string' && GATED.test(new URL(url, document.baseURI).pathname)) {
++        const body = JSON.parse(init.body);
++        const target = typeof body.workspace === 'string' && body.workspace ? body.workspace : (typeof body.path === 'string' ? body.path : '');
++        if (target && /^[A-Za-z]:[\\/]/.test(target)) {
++          const verdict = await ensureTrusted(target);
++          if (!verdict.ok) return new Response(JSON.stringify({ error: verdict.message }), { status: 403, headers: { 'Content-Type': 'application/json' } });
++        }
++      }
++    } catch (_) { /* never block the page on a parsing problem */ }
++    return nativeFetch(input, init);
++  };
++
++  /* Settings > Preferences > "Trusted folders": list and revoke, inline. */
++  const SECTION_ID = 'trusted-folders-section';
++
++  async function renderSettings() {
++    const pane = document.getElementById('settingsPanePreferences');
++    if (!pane || !enabled) return;
++    let section = document.getElementById(SECTION_ID);
++    if (!section) {
++      section = el('div', { id: SECTION_ID, className: 'settings-field' });
++      const save = pane.querySelector('button[onclick*="saveSettings"]');
++      pane.insertBefore(section, save || null);
++    }
++    const r = await json('api/trusted-workspaces');
++    const rows = [];
++    const row = (path, kind, removable) => {
++      const line = el('div', {}, el('code', { textContent: path }), el('span', { textContent: ' ' + kind }));
++      line.style.cssText = 'display:flex;align-items:center;gap:8px;justify-content:space-between;padding:5px 0;border-bottom:1px solid rgba(127,127,127,.25);word-break:break-all;font-size:12px';
++      if (removable) {
++        const b = el('button', { type: 'button', textContent: 'Revoke', className: 'sm-btn' });
++        b.addEventListener('click', async event => {
++          if (!event.isTrusted) return;
++          b.disabled = true;
++          const res = await json('api/trusted-workspaces/revoke', { method: 'POST', body: JSON.stringify({ path }) });
++          if (res.ok) renderSettings(); else { b.disabled = false; b.textContent = res.data.error || 'Failed'; }
++        });
++        line.append(b);
++      }
++      rows.push(line);
++    };
++    if (r.ok && r.data.enabled) {
++      for (const path of r.data.configured) row(path, '(set when Hermes starts; cannot be revoked here)', false);
++      for (const item of r.data.always) row(item.path, item.active ? '(always)' : '(always; folder changed, needs re-approval)', true);
++      for (const path of r.data.once) row(path, '(until Hermes restarts)', true);
++      if (!rows.length) rows.push(el('div', { textContent: 'No folders are trusted. Hermes cannot write anywhere until you approve one.' }));
++    }
++    const hint = el('div', { textContent: "Folders Hermes's file tools may write in. This is a permission for those tools only, not an operating-system sandbox." });
++    hint.style.cssText = 'font-size:11px;color:var(--muted);margin-bottom:6px';
++    section.replaceChildren(el('label', { textContent: 'Trusted folders' }), hint, ...rows);
++  }
++
++  window.refreshTrustedFolders = renderSettings;
++  ready.then(() => {
++    if (!enabled) return;
++    renderSettings();
++    const pane = document.getElementById('settingsPanePreferences');
++    if (pane) new MutationObserver(() => { if (pane.classList.contains('active')) renderSettings(); }).observe(pane, { attributes: true, attributeFilter: ['class'] });
++  });
++})();

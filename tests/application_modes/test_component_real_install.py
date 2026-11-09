@@ -2,6 +2,7 @@
 import json
 import os
 from pathlib import Path
+import subprocess
 import unittest
 import uuid
 from unittest.mock import patch
@@ -19,6 +20,12 @@ class RealInstallTests(unittest.TestCase):
         config = manager.ensure(fresh=True)
         self.assertEqual(config['origin'], 'managed')
         self.assertEqual(os.environ.get('HERMES_WRITE_SAFE_ROOT'), original_policy)
+        from src.hermes_component import load_pins, patch_file, patch_state
+        webui = Path(config['webui'])
+        self.assertEqual(patch_state(webui, patch_file(ROOT, 'webui')), 'applied')
+        probe = subprocess.run([config['python'], '-B', '-c', 'import api.trusted_workspaces as t; print(t.ENV)'], cwd=webui,
+                               capture_output=True, text=True, timeout=120)
+        self.assertEqual(probe.stdout.strip(), 'HERMES_WRITE_SAFE_ROOT', probe.stderr[-400:])
         home = Path(config['home'])
         retained = home / 'fixture-memory.txt'
         retained.write_text('user state is retained', encoding='utf-8')

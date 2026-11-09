@@ -40,3 +40,7 @@ static/lib/** -whitespace linguist-vendored
 # Notes reference deployment modules.
 static/js/features/notes/** text eol=lf
 static/js/shared/ui/confetti.js text eol=lf
+
+# Pinned patches are applied byte-for-byte; never normalize their line endings.
+integrations/hermes-mode/patches/*.patch -text
+integrations/hermes-mode/patches/*.py text eol=lf

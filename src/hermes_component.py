@@ -30,15 +30,56 @@ class SourcePin:
         return 'https://github.com/' + self.repository + '.git'
 
 
-def verify_checkout(path, pin):
+def _git(path, *args, check=True):
+    result = subprocess.run(['git', '-C', str(path), *args], capture_output=True, text=True, timeout=60)
+    if check and result.returncode:
+        raise ComponentError('Cannot verify the Hermes source checkout.')
+    return result
+
+
+_PATCH_FLAGS = ('apply', '--ignore-whitespace', '--whitespace=nowarn')
+_PATCHES = {'webui': 'integrations/hermes-mode/patches/webui-trusted-workspaces.patch'}
+
+
+def patch_file(application_root, name):
+    relative = _PATCHES.get(name)
+    path = Path(application_root) / relative if relative else None
+    return path if path and path.is_file() else None
+
+
+def _patch_files(patch):
+    return {line[6:].strip() for line in Path(patch).read_text(encoding='utf-8').splitlines() if line.startswith('+++ b/')}
+
+
+def patch_state(path, patch):
+    """'absent' (clean at the pin), 'applied' (exactly the reviewed patch), or 'foreign' (anything else)."""
+    if _git(path, 'rev-parse', 'HEAD').stdout.strip() and not _git(path, 'status', '--porcelain', '--untracked-files=no').stdout.strip():
+        return 'absent'
+    if patch and _git(path, *_PATCH_FLAGS, '-R', '--check', str(patch), check=False).returncode == 0:
+        changed = {line.strip() for line in _git(path, 'diff', '--name-only').stdout.splitlines()}
+        if changed <= _patch_files(patch):
+            return 'applied'
+    return 'foreign'
+
+
+def verify_checkout(path, pin, patch=None):
     path = Path(path)
-    def git(*args):
-        result = subprocess.run(['git', '-C', str(path), *args], capture_output=True, text=True, timeout=60)
-        if result.returncode:
-            raise ComponentError('Cannot verify the Hermes source checkout.')
-        return result.stdout.strip()
-    if git('rev-parse', 'HEAD') != pin.revision or git('status', '--porcelain', '--untracked-files=no'):
+    if _git(path, 'rev-parse', 'HEAD').stdout.strip() != pin.revision or patch_state(path, patch) == 'foreign':
         raise ComponentError('Hermes source differs from the reviewed pin; it will not be overwritten.')
+
+
+def apply_patch(path, pin, patch):
+    """Apply the reviewed patch to a checkout that is clean at the pin. Idempotent; refuses anything else."""
+    if not patch:
+        return 'none'
+    verify_checkout(path, pin, patch)
+    if patch_state(path, patch) == 'applied':
+        return 'applied'
+    if _git(path, *_PATCH_FLAGS, '--check', str(patch), check=False).returncode:
+        raise ComponentError('The reviewed Hermes patch does not apply to this source; nothing was changed.')
+    _git(path, *_PATCH_FLAGS, str(patch))
+    verify_checkout(path, pin, patch)
+    return 'applied'
 
 
 class ComponentError(RuntimeError):
@@ -239,7 +280,7 @@ def run_install(command, log_path, environment, cwd=None):
         raise ComponentError('Hermes setup failed; inspect the private component install log. Existing state was retained.')
 
 
-def checkout_source(target, pin, log_path, environment):
+def checkout_source(target, pin, log_path, environment, patch=None):
     git = shutil.which('git')
     if not git:
         raise ComponentError('Git for Windows is required to provision verified Hermes sources.')
@@ -251,6 +292,7 @@ def checkout_source(target, pin, log_path, environment):
     run_install([git, '-C', str(target), '-c', 'core.longpaths=true', '-c', 'core.hooksPath=' + str(target / '.git/no-hooks'), 'checkout', '--detach', pin.revision], log_path, env)
     run_install([git, '-C', str(target), 'fsck', '--strict'], log_path, env)
     verify_checkout(target, pin)
+    apply_patch(target, pin, patch)
 
 
 class ComponentManager:
@@ -276,6 +318,7 @@ class ComponentManager:
                 raise ComponentError('Fresh provisioning cannot replace an existing component configuration.')
             if config and not repair:
                 self.validate(config)
+                self.apply_patches(config)
                 if enable and not config['enabled']:
                     config = {**config, 'enabled': True}
                     atomic_json(self.config_path, config)
@@ -283,6 +326,7 @@ class ComponentManager:
             candidate = existing if existing is not None else self._install_generation(config)
             pins = load_pins(self.application_root)
             self.validate(candidate, require_extension=False)
+            self.apply_patches(candidate)
             from src.application_modes import ModeConfig
             odysseus_url = self.environment.get('ODYSSEUS_MODE_RETURN_URL', 'http://127.0.0.1:7000/')
             hermes_url = self.environment.get('ODYSSEUS_HERMES_MODE_URL', 'http://127.0.0.1:8787/')
@@ -294,6 +338,11 @@ class ComponentManager:
                          'extension_package': result['package'], 'revisions': {name: pin.revision for name, pin in pins.items()}}
             atomic_json(self.config_path, candidate)
             return candidate
+
+    def apply_patches(self, config):
+        """Bring each checkout to the reviewed pin plus the reviewed patch, only ever from a clean pin."""
+        pins = load_pins(self.application_root)
+        return {name: apply_patch(safe_directory(config[name]), pins[name], patch_file(self.application_root, name)) for name in pins}
 
     def refresh_extension(self):
         """Re-register the packaged return extension for the saved component; changes nothing else."""
@@ -312,7 +361,7 @@ class ComponentManager:
         pins = load_pins(self.application_root)
         try:
             for name in pins:
-                verify_checkout(safe_directory(config[name]), pins[name])
+                verify_checkout(safe_directory(config[name]), pins[name], patch_file(self.application_root, name))
             probe_python(config['python'], require_agent=True)
             for name in ('home', 'state_dir'):
                 path = safe_directory(config[name])
@@ -337,7 +386,7 @@ class ComponentManager:
         seed = self.environment.get('HERMES_WEBUI_PYTHON') or sys.executable
         probe_python(seed)
         for name, pin in pins.items():
-            checkout_source(generation / name, pin, log, env)
+            checkout_source(generation / name, pin, log, env, patch_file(self.application_root, name))
         agent = generation / 'agent'
         run_install([seed, '-B', '-m', 'pm.build_env', '--source', str(agent), '--out', str(agent / 'venv'),
                      '--cache', str(self.root / 'managed/cache')], log, env, cwd=agent)
