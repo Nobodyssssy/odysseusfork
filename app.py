@@ -723,6 +723,10 @@ from src.application_modes import create_mode_service, make_router as make_mode_
 app.state.application_mode_service = create_mode_service()
 app.include_router(make_mode_router(app.state.application_mode_service))
 
+# Outermost middleware: hermes.localhost:<port> is proxied to the loopback Hermes backend.
+from src.hermes_proxy import install_hermes_proxy
+install_hermes_proxy(app, app.state.application_mode_service)
+
 
 @app.post("/api/activity/heartbeat")
 async def activity_heartbeat():

@@ -54,3 +54,18 @@ The application discovers saved component configuration on startup. The normal W
 `HERMES_WRITE_SAFE_ROOT` is inherited rather than expanded by mode switching. Reading an already-approved Windows User environment setting when it is absent from a launcher process is not a permission-approval mechanism. Existing permissions, credentials, databases, model configuration, startup registrations, and active runs must be preserved.
 
 An occupied port alone is not evidence of a Hermes service. A health marker is a compatibility check, not cryptographic authentication. All configured mode destinations and owned Hermes startup bindings are restricted to `127.0.0.1`; remote exposure, shared-origin proxying, authentication changes, and protected human-approval infrastructure are outside this draft.
+
+## One port: `hermes.localhost`
+
+When Hermes mode is configured, Odysseus serves the complete Hermes WebUI on its own port at `http://hermes.localhost:<port>/` (for example `http://hermes.localhost:7000/`). Odysseus stays at `http://localhost:<port>/`. `src/hermes_proxy.py` is installed as the outermost ASGI middleware and routes by `Host` only; every other host reaches Odysseus unchanged.
+
+- **Separate origins.** The two apps keep separate cookies, storage, service workers, CSRF checks and CSP. Hermes headers (including `X-Frame-Options: DENY`) pass through untouched. This is not one shared login.
+- **Request handling.** `Host`, `Origin`, cookies and bodies are forwarded unchanged. Responses and uploads are streamed, so SSE chat streaming and large transfers are not buffered. Compressed responses are passed through byte-for-byte. A `Location` header pointing at the internal address is rewritten to the public host. WebSockets are refused (Hermes does not use them).
+- **Validation.** `Host` must equal `hermes.localhost:<listener port>` exactly. The TCP peer must be loopback, and any `Forwarded`/`X-Forwarded-*`/`X-Real-IP` header is refused, so a LAN-bound Odysseus cannot expose Hermes. The upstream must be an explicit `http://127.0.0.1:PORT/` address.
+- **Backend stays independent.** Hermes still listens only on `127.0.0.1:<its port>` and remains directly reachable there. If it is stopped, `hermes.localhost` answers 502 and Odysseus keeps working; selecting Hermes Mode starts it again.
+- **Navigation.** The selector goes to `hermes.localhost:<port>` when the page was opened as `localhost`, and to the direct Hermes address otherwise or when the OS resolver cannot resolve `hermes.localhost`. The return button goes back to `localhost:<same port>` and skips its reachability probe on the proxied host.
+- **Switch off:** set `ODYSSEUS_HERMES_PROXY=0`. Mode switching then uses the direct address as before.
+
+Known limits: Hermes has its own authentication, which is off unless you set `HERMES_WEBUI_PASSWORD`; the proxy does not add any. Hermes still writes a finished chat to disk about a second after the reply, so a hard kill inside that window loses it (unchanged by the proxy). Only Chromium (Edge) was automated; Windows resolves `hermes.localhost` natively.
+
+Existing installs need `scripts/hermes-component.py refresh` once to install the updated return extension. It changes only that extension package and the component config, and restarts nothing.

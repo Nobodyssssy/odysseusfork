@@ -68,6 +68,13 @@ function hermesURL(value) {
   return url;
 }
 
+function destination(status) {
+  if (status.proxy && location.protocol === 'http:' && location.hostname === 'localhost' && location.port) {
+    return new URL(`http://hermes.localhost:${location.port}/`);
+  }
+  return hermesURL(status.url);
+}
+
 async function initialize() {
   let status;
   try { status = await request(endpoint); } catch (_) { return; }
@@ -113,14 +120,15 @@ async function initialize() {
       }
       const deadline = Date.now() + 90000;
       while (status.state !== 'ready' && Date.now() < deadline) {
-        if (['conflict', 'unavailable'].includes(status.state)) throw new Error('Hermes is unavailable. No existing process was restarted. Try again when it is healthy.');
+        if (status.state === 'conflict') throw new Error('Another program is using the Hermes port. No existing process was restarted.');
+        message.textContent = 'Starting Hermes…';
         await new Promise(resolve => setTimeout(resolve, 1000));
         status = await request(endpoint);
       }
       if (status.state !== 'ready') throw new Error('Hermes is not ready yet. Stay here and try again; no process was stopped.');
       await assertCanLeave();
       await saveChatState();
-      location.assign(hermesURL(status.url).href);
+      location.assign(destination(status).href);
     } catch (error) {
       message.textContent = error.message;
       selector.value = 'odysseus';

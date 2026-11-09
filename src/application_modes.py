@@ -81,6 +81,7 @@ class ModeService:
     def __init__(self, config, error=None):
         self.config = config
         self.error = error
+        self.proxy = False
         self._lock = threading.Lock()
         self._process = None
 
@@ -114,6 +115,9 @@ class ModeService:
             return {'enabled': False}
         port = urlsplit(self.config.url).port
         result = {'enabled': True, 'url': self.config.url, 'owned': False}
+        if self.proxy:
+            from src.hermes_proxy import hostname_resolves
+            result['proxy'] = hostname_resolves()
         connection = http.client.HTTPConnection('127.0.0.1', port, timeout=2)
         try:
             connection.request('GET', '/health')

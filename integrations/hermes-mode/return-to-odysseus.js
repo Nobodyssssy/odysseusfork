@@ -1,11 +1,17 @@
 /* Standalone WebUI extension: navigation only, no permission or model changes. */
 (async function () {
-  const scriptURL = document.currentScript?.src || new URL('extensions/odysseus-mode/return-to-odysseus.js', document.baseURI);
-  const response = await fetch(new URL('connection.json', new URL('.', scriptURL)), { credentials: 'same-origin', signal: AbortSignal.timeout(5000) });
-  if (!response.ok) return;
-  const config = await response.json();
-  const target = new URL(config.odysseus_url);
-  if (target.protocol !== 'http:' || target.hostname !== '127.0.0.1' || !target.port || target.pathname !== '/' || target.search || target.hash || target.username || target.password || target.origin === location.origin) return;
+  // Served through Odysseus (hermes.localhost:PORT): return to the same port on localhost.
+  const proxied = location.protocol === 'http:' && location.hostname === 'hermes.localhost' && !!location.port;
+  let target;
+  if (proxied) {
+    target = new URL(`http://localhost:${location.port}/`);
+  } else {
+    const scriptURL = document.currentScript?.src || new URL('extensions/odysseus-mode/return-to-odysseus.js', document.baseURI);
+    const response = await fetch(new URL('connection.json', new URL('.', scriptURL)), { credentials: 'same-origin', signal: AbortSignal.timeout(5000) });
+    if (!response.ok) return;
+    target = new URL((await response.json()).odysseus_url);
+  }
+  if (target.protocol !== 'http:' || target.hostname !== (proxied ? 'localhost' : '127.0.0.1') || !target.port || target.pathname !== '/' || target.search || target.hash || target.username || target.password || target.origin === location.origin) return;
   const nav = document.createElement('nav');
   nav.id = 'odysseus-mode-return';
   nav.setAttribute('aria-label', 'Application mode');
@@ -28,10 +34,12 @@
       const text = input?.value || '';
       const sid = S.session?.session_id || null;
       if (S.pendingFiles?.length || document.getElementById('fileInput')?.files?.length) throw new Error('Send or remove pending attachments before returning; no attachment was discarded.');
-      try {
-        // Reachability only: opaque no-cors responses do not prove app identity.
-        await fetch(new URL('api/health', target), { mode: 'no-cors', credentials: 'omit', cache: 'no-store', signal: AbortSignal.timeout(4000) });
-      } catch (_) { throw new Error('Odysseus is not reachable. Hermes stays open; start Odysseus and retry.'); }
+      if (!proxied) {
+        try {
+          // Reachability only: opaque no-cors responses do not prove app identity.
+          await fetch(new URL('api/health', target), { mode: 'no-cors', credentials: 'omit', cache: 'no-store', signal: AbortSignal.timeout(4000) });
+        } catch (_) { throw new Error('Odysseus is not reachable. Hermes stays open; start Odysseus and retry.'); }
+      }
       if (sid && typeof _saveComposerDraftNow === 'function') {
         const continuation = typeof _peekRestoredGoalContinuationDraft === 'function' ? _peekRestoredGoalContinuationDraft() : null;
         const continuationId = continuation && continuation.text === text ? continuation.id : '';

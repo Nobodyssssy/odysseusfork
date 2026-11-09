@@ -15,7 +15,7 @@ from src.runtime_paths import get_hermes_component_root
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=('ensure', 'repair', 'disable', 'enable', 'status', 'serve', 'plan'))
+    parser.add_argument('action', choices=('ensure', 'repair', 'disable', 'enable', 'status', 'serve', 'plan', 'refresh'))
     parser.add_argument('--root', type=Path)
     parser.add_argument('--fresh', action='store_true', help='New isolated install only; never reinitializes saved state')
     parser.add_argument('--webui', type=Path)
@@ -52,6 +52,8 @@ def main(argv=None):
             payload = {'enabled': False, 'state': 'disabled', 'processes_stopped': False}
         elif args.action == 'serve':
             return serve_component(root, APP_ROOT, environment)
+        elif args.action == 'refresh':
+            payload = manager.refresh_extension()
         else:
             existing = None
             if (not config or args.action == 'plan') and not args.fresh:

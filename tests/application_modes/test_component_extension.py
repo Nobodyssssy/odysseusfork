@@ -17,6 +17,7 @@ let requested;
 const script=process.argv[1];
 vm.runInNewContext(fs.readFileSync(script,'utf8'),{
  URL,AbortSignal,console,
+ location:{protocol:'http:',hostname:'127.0.0.1',port:'8787',origin:'http://127.0.0.1:8787'},
  document:{baseURI:'http://127.0.0.1:8787/',currentScript:{src:'http://127.0.0.1:8787/extensions/odysseus-mode/return-to-odysseus.js'}},
  fetch:(url)=>{requested=String(url);return new Promise(()=>{});}
 });
@@ -24,6 +25,24 @@ console.log(requested);
 """
         result = subprocess.check_output(['node', '-e', code, str(script)], text=True).strip()
         self.assertEqual(result, 'http://127.0.0.1:8787/extensions/odysseus-mode/connection.json')
+
+    def test_return_script_targets_localhost_when_served_through_the_proxy_host(self):
+        import subprocess
+        script = ROOT / 'integrations/hermes-mode/return-to-odysseus.js'
+        code = r"""
+const fs=require('fs'),vm=require('vm');
+let href;const requested=[];
+const element=()=>({setAttribute(){},addEventListener(){},append(){},set href(v){href=v},get href(){return href}});
+vm.runInNewContext(fs.readFileSync(process.argv[1],'utf8'),{
+ URL,AbortSignal,console:{warn(){}},
+ location:{protocol:'http:',hostname:'hermes.localhost',port:'7000',origin:'http://hermes.localhost:7000'},
+ document:{baseURI:'http://hermes.localhost:7000/',createElement:element,body:{append(){}}},
+ fetch:(url)=>{requested.push(String(url));return new Promise(()=>{});}
+});
+setImmediate(()=>console.log(JSON.stringify({href,requested})));
+"""
+        result = json.loads(subprocess.check_output(['node', '-e', code, str(script)], text=True))
+        self.assertEqual(result, {'href': 'http://localhost:7000/', 'requested': []})
 
     def test_registration_preserves_other_extensions_and_is_idempotent(self):
         import src.hermes_component as component

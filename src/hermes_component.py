@@ -295,6 +295,19 @@ class ComponentManager:
             atomic_json(self.config_path, candidate)
             return candidate
 
+    def refresh_extension(self):
+        """Re-register the packaged return extension for the saved component; changes nothing else."""
+        with component_lock(self.config_path.parent):
+            config = read_config(self.config_path)
+            if not config or not config['enabled']:
+                raise ComponentError('Hermes mode is disabled or not installed.')
+            self.validate(config, require_extension=False)
+            result = register_return_extension(config['state_dir'], self.application_root / 'integrations/hermes-mode',
+                                               config['return_url'], config.get('extension_dir'))
+            config = {**config, 'extension_dir': result['extension_dir'], 'extension_package': result['package']}
+            atomic_json(self.config_path, config)
+            return config
+
     def validate(self, config, require_extension=True):
         pins = load_pins(self.application_root)
         try:
