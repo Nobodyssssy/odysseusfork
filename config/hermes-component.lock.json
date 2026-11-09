@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "agent": {
+    "repository": "NousResearch/hermes-agent",
+    "revision": "2bd378ed1b8d6bf2192cb26e0a55ff3091e6bd19"
+  },
+  "webui": {
+    "repository": "nesquena/hermes-webui",
+    "revision": "f328d3f8e17f92a72fd71cc05f1e45665f2bc662"
+  },
+  "runtime": { "major": 3, "minor": 14, "owner": "hermes-pm", "extras": [] }
+}

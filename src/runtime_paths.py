@@ -28,3 +28,14 @@ def get_default_data_dir() -> str:
     if getattr(sys, "frozen", False):
         return os.path.join(os.path.expanduser("~"), ".odysseus", "data")
     return os.path.join(get_app_root(), "data")
+
+
+def get_hermes_component_root(environment=None):
+    """Persistent optional-component location, never under the source checkout."""
+    source = os.environ if environment is None else environment
+    override = source.get('ODYSSEUS_HERMES_COMPONENT_ROOT')
+    if override:
+        return override
+    if os.name == 'nt' and source.get('LOCALAPPDATA'):
+        return os.path.join(source['LOCALAPPDATA'], 'Odysseus', 'hermes')
+    return None

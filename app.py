@@ -718,6 +718,11 @@ webhook_manager = WebhookManager(api_key_manager=api_key_manager)
 auth_router = setup_auth_routes(auth_manager)
 app.include_router(auth_router)
 
+# Disabled unless the operator explicitly configures a standalone Hermes URL.
+from src.application_modes import create_mode_service, make_router as make_mode_router
+app.state.application_mode_service = create_mode_service()
+app.include_router(make_mode_router(app.state.application_mode_service))
+
 
 @app.post("/api/activity/heartbeat")
 async def activity_heartbeat():

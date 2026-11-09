@@ -53,6 +53,7 @@ services/data/
 *~
 
 # Test capture artifacts (browser session dumps may contain personal content)
+.release-tests/
 .playwright-mcp/
 test-results/
 playwright-report/
