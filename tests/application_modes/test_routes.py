@@ -31,6 +31,11 @@ class RouteTests(unittest.TestCase):
         self.assertEqual(client.get('/api/application-modes').json()['state'], 'ready')
         service.start.assert_not_called()
 
+    def test_localhost_name_is_accepted_but_other_hostnames_are_not(self):
+        client, service = self.client()
+        self.assertEqual(client.get('/api/application-modes', headers={'Host': 'localhost:17000'}).status_code, 200)
+        self.assertEqual(client.get('/api/application-modes', headers={'Host': 'attacker.example:17000'}).status_code, 403)
+
     def test_remote_clients_are_denied(self):
         client, service = self.client(address='192.0.2.4')
         self.assertEqual(client.get('/api/application-modes').status_code, 403)

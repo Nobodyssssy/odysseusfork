@@ -149,7 +149,7 @@ def make_router(service):
 
     def local_only(request):
         forwarded = any(name in request.headers for name in ('forwarded', 'x-forwarded-for', 'x-forwarded-host', 'x-forwarded-proto', 'x-real-ip'))
-        if forwarded or not request.client or request.client.host != '127.0.0.1' or request.url.hostname != '127.0.0.1':
+        if forwarded or not request.client or request.client.host not in ('127.0.0.1', '::1') or request.url.hostname not in ('127.0.0.1', 'localhost'):
             raise HTTPException(403, 'Application modes are local-only')
 
     @router.get('')
