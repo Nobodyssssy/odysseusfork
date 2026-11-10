@@ -138,6 +138,20 @@ function render(data) {
         return result.result === 'already_present' ? 'Already present on both sides.' : `Added to ${result.target === 'hermes' ? 'Hermes' : 'Odysseus'}. If it needs a key, enter it there.`;
       }), !row.sync.startsWith('pending_')),
     );
+    if (row.key_copy === 'available') {
+      actions.append(button('Copy key to Odysseus', () => {
+        const ok = window.confirm(`Copy the ${row.name} API key from Hermes into Odysseus?\n\n` +
+          'The Odysseus server copies it directly; it is never shown on this page. Hermes keeps its own copy. ' +
+          'Odysseus stores it encrypted and anything that can use Odysseus model endpoints will be able to use this key.');
+        if (!ok) return;
+        act(row, async () => {
+          const result = await call('/copy-key', 'POST', { id: row.id, confirm: true });
+          return result.result === 'created' ? `${row.name} was added to Odysseus with the copied key.` : `The key was added to the existing ${row.name} endpoint in Odysseus.`;
+        });
+      }));
+    } else if (row.key_copy === 'already') {
+      actions.append(Object.assign(document.createElement('small'), { textContent: 'Odysseus has a key' }));
+    }
     tr.append(name, cell(SOURCE[row.source] || row.source), modelsCell(row),
       appCell(row.status.odysseus), appCell(row.status.hermes), cell(SYNC[row.sync] || row.sync, 'sync ' + row.sync), share, actions);
     body.append(tr);

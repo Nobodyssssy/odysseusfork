@@ -33,15 +33,30 @@ class ProviderRouteTests(unittest.TestCase):
             service.apply.return_value = {'result': 'added'}
             service.apply_all.return_value = []
             service.test.return_value = {'state': 'online'}
+            service.copy_key.return_value = {'result': 'created', 'id': 'x'}
         app.include_router(make_provider_sync_router(lambda: service))
         return TestClient(app, base_url='http://127.0.0.1:17000', client=(address, 40000)), service
 
     WRITES = [('/api/provider-sync/refresh', None), ('/api/provider-sync/share', {'id': 'x', 'enabled': True}),
-              ('/api/provider-sync/apply', {'id': 'x'}), ('/api/provider-sync/apply-all', None), ('/api/provider-sync/test', {'id': 'x'})]
+              ('/api/provider-sync/apply', {'id': 'x'}), ('/api/provider-sync/apply-all', None), ('/api/provider-sync/test', {'id': 'x'}),
+              ('/api/provider-sync/copy-key', {'id': 'x', 'confirm': True})]
 
     def post(self, client, path, body, headers=None):
         headers = ORIGIN if headers is None else headers
         return client.post(path, json=body, headers=headers) if body is not None else client.post(path, headers=headers)
+
+    def test_copying_a_key_needs_explicit_confirmation_and_the_response_has_no_key(self):
+        client, service = self.client()
+        for body in ({'id': 'x'}, {'id': 'x', 'confirm': False}):
+            self.assertEqual(self.post(client, '/api/provider-sync/copy-key', body).status_code, 400)
+        service.copy_key.assert_not_called()
+        response = self.post(client, '/api/provider-sync/copy-key', {'id': 'x', 'confirm': True})
+        self.assertEqual((response.status_code, response.json()), (200, {'result': 'created', 'id': 'x'}))
+        service.copy_key.assert_called_once_with('x')
+        service.copy_key.side_effect = SyncError('Odysseus already has a key for this provider; it was not changed.')
+        refused = self.post(client, '/api/provider-sync/copy-key', {'id': 'x', 'confirm': True})
+        self.assertEqual(refused.status_code, 409)
+        self.assertNotIn(SECRET, refused.text)
 
     def test_a_local_admin_in_a_browser_can_read_and_act(self):
         client, service = self.client()

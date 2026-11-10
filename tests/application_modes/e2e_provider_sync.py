@@ -18,6 +18,7 @@ ROOT = Path(__file__).resolve().parents[2]
 STATE = ROOT / '.mode-dev'
 ODY_PORT, HER_PORT = 17020, 18820
 SECRET = 'sk-E2E-SENTINEL-must-never-appear-9f3a7c21'
+HSECRET = 'sk-HER...0042'     # stand-in for the key Hermes holds for OpenCode Zen in this ISOLATED copy (never a real credential)
 HERMES_PY = 'C:/Users/Protagonist/AppData/Local/hermes/installs/562e58e2ea9aca80/environments/f8e9074e29494d6589e6dc5db08630d3/venv/Scripts/python.exe'
 BODIES = []          # every response body seen, scanned for the secret at the end
 results = []
@@ -128,7 +129,7 @@ def hermes_named(name):
 
 def start_hermes():
     status, data = ody('POST', '/api/application-modes/hermes/start')
-    wait(lambda: her('GET', '/health')[0] == 200, 150, 'hermes healthy')
+    wait(lambda: her('GET', '/health')[0] == 200, 300, 'hermes healthy')   # a fresh data root installs its runtime first (~90s)
 
 
 def restart(port):
@@ -171,7 +172,7 @@ def main():
     check('baseline: provider catalog reads both applications', catalog()['applications'] == {'odysseus': 'ready', 'hermes': 'ready'})
     baseline = catalog()
     check('Hermes OAuth/subscription logins are listed but never shareable',
-          all(r['sync'] in ('not_shareable_credential', 'not_shareable') for r in baseline['providers'] if r['source'] == 'hermes' and r['auth'] in ('oauth', 'process')))
+          all((not r['portable']) and r['sync'].startswith('not_shareable') for r in baseline['providers'] if r['source'] == 'hermes' and r['auth'] in ('oauth', 'process')))
     codex = [r for r in baseline['providers'] if r['name'] == 'OpenAI Codex']
     if codex:
         status, _ = ody('POST', '/api/provider-sync/share', body={'id': codex[0]['id'], 'enabled': True})
@@ -259,6 +260,40 @@ def main():
     check('mirrored cloud provider asks for authentication in Hermes', row_cloud['status'].get('hermes') == 'requires_authentication' and row_cloud['status'].get('odysseus') == 'connected', row_cloud)
 
     # --- restart persistence ------------------------------------------------------------------
+    # --- explicit key copy: Hermes -> Odysseus ------------------------------------------------------------
+    env_path = STATE / 'hermes/.env'      # the isolated copy: a stand-in key replaces the real one here
+    kept = [l for l in env_path.read_text(encoding='utf-8').splitlines() if not l.startswith('OPENCODE_ZEN_API_KEY=')]
+    env_path.write_text(chr(10).join(kept + ['OPENCODE_ZEN_API_KEY=' + HSECRET]) + chr(10), encoding='utf-8')
+    env_after_write = env_path.read_bytes()
+    zen_id = 'ep:https://opencode.ai/zen/v1'
+    rows = {r['name']: r for r in catalog()['providers']}
+    zen = rows.get('OpenCode Zen')
+    check('OpenCode Zen (key in Hermes .env) offers "copy key"', zen is not None and zen['id'] == zen_id and zen['key_copy'] == 'available', zen and zen['key_copy'])
+    check('login-based and own-protocol Hermes providers never offer a key copy',
+          all(r['key_copy'] == 'unavailable' for n, r in rows.items() if n in ('OpenAI Codex', 'Nous Portal', 'Solstice') or 'Claude Subscription' in n))
+    check('copy-key needs a logged-in administrator', ody('POST', '/api/provider-sync/copy-key', body={'id': zen_id, 'confirm': True}, cookie=False)[0] in (401, 403))
+    check('copy-key without confirmation is refused', ody('POST', '/api/provider-sync/copy-key', body={'id': zen_id})[0] == 400)
+    check('nothing was created by the refused attempts', 'opencode.ai' not in json.dumps(ody('GET', '/api/model-endpoints')[1]))
+    status, copied = ody('POST', '/api/provider-sync/copy-key', body={'id': zen_id, 'confirm': True})
+    check('confirmed copy succeeds and the response carries no key', status == 200 and copied == {'result': 'created', 'id': zen_id} and HSECRET not in json.dumps(copied), (status, copied))
+    row = {r['name']: r for r in catalog()['providers']}['OpenCode Zen']
+    check('Odysseus now lists the provider as configured and the catalog says it already has a key',
+          row['key_copy'] == 'already' and row['status'].get('odysseus') == 'connected' and row['status'].get('hermes') == 'connected', (row['key_copy'], row['status']))
+    db_path = STATE / 'odysseus/app.db'
+    def stored_key():
+        import sqlite3
+        connection = sqlite3.connect(f'file:{db_path}?mode=ro', uri=True)
+        try:
+            return connection.execute("select api_key from model_endpoints where base_url like '%opencode.ai%'").fetchone()
+        finally:
+            connection.close()
+    first = stored_key()
+    check('Odysseus stored it in its own encrypted column (enc: prefix, never plaintext)', first is not None and first[0].startswith('enc:') and HSECRET not in first[0], first and first[0][:8])
+    check('Hermes kept its own copy untouched', env_path.read_bytes() == env_after_write)
+    status, again = ody('POST', '/api/provider-sync/copy-key', body={'id': zen_id, 'confirm': True})
+    check('a second copy is refused and the stored key is not replaced', status == 409 and 'already has a key' in json.dumps(again) and stored_key() == first, (status, again))
+    check("Odysseus's own endpoint list never returns the key", HSECRET not in json.dumps(ody('GET', '/api/model-endpoints')[1]))
+
     before = {r['id']: (r['share_enabled'], r['sync']) for r in catalog()['providers'] if r['id'].startswith('ep:')}
     restart(HER_PORT)
     restart(ODY_PORT)
@@ -269,6 +304,8 @@ def main():
     after = {r['id']: (r['share_enabled'], r['sync']) for r in catalog()['providers'] if r['id'].startswith('ep:')}
     check('sharing choices, mirrors and tombstone state persist across restarts of both applications', before == after, (before, after))
     check('Hermes mirrors persist after its restart', len(hermes_named('E2E Local A')) == 1)
+    persisted = {r['name']: r for r in catalog()['providers']}.get('OpenCode Zen')
+    check('the copied key persists across restarts of both applications', persisted is not None and persisted['key_copy'] == 'already' and stored_key() == first)
 
     # --- global invariants ----------------------------------------------------------------------
     blob = b'\n'.join(BODIES)
@@ -277,6 +314,16 @@ def main():
         for path in ([folder] if folder.is_file() else [p for p in folder.rglob('*') if p.is_file()]):
             scanned[str(path.relative_to(STATE))] = path.read_bytes()
     leaks = [name for name, content in scanned.items() if SECRET.encode() in content]
+    held = {'responses': blob, 'hermes config': config_path.read_bytes(), 'sync state': (STATE / 'component/managed/provider-sync.json').read_bytes()}
+    for folder in (STATE / 'odysseus/logs', STATE / 'component/managed'):
+        for path in [p for p in folder.rglob('*') if p.is_file()]:
+            held[str(path.relative_to(STATE))] = path.read_bytes()
+    for suffix in ('', '-wal', '-shm'):
+        candidate = Path(str(db_path) + suffix)
+        if candidate.exists():
+            held[candidate.name] = candidate.read_bytes()
+    where = [name for name, content in held.items() if HSECRET.encode() in content]
+    check(f'the Hermes key appears in none of {len(held)} responses, logs, state files and the Odysseus database', not where, where)
     check(f'the API key appears in none of {len(scanned)} responses, configs, state files, backups and logs', not leaks, leaks)
     check("Hermes auth.json: no login added, removed or renamed by sync", auth_shape() == auth_before)
     check('no fake-LLM request ever carried a credential', all(a is None for llm in (llm_a, llm_b) for a in llm.auth_headers))

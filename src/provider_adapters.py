@@ -138,7 +138,7 @@ def hermes_entries(providers_payload, config_urls=None):
             canonical=canonical, models=model_ids(item.get('models')), auth=auth,
             has_credential=has_key, enabled=True,
             reason='auth_error' if item.get('auth_error') else ('plugin' if item.get('is_plugin_provider') and not base and pid not in KNOWN_OPENAI_COMPATIBLE else ''),
-            self_hosted=self_hosted,
+            self_hosted=self_hosted, key_source=str(item.get('key_source') or '')[:24],
         ))
     return entries
 

@@ -15,6 +15,11 @@ class Share(BaseModel):
     enabled: bool
 
 
+class CopyKey(BaseModel):
+    id: str
+    confirm: bool = False
+
+
 def _reader(request):
     from core.middleware import require_admin
     require_local(request)
@@ -63,6 +68,13 @@ def make_provider_sync_router(get_service):
     def apply_all(request: Request):
         require_browser_admin(request)
         return {'results': service().apply_all()}
+
+    @router.post('/copy-key')
+    def copy_key(body: CopyKey, request: Request):
+        require_browser_admin(request)
+        if body.confirm is not True:
+            raise HTTPException(400, 'Confirm that you want to copy this key.')
+        return guarded(lambda: service().copy_key(body.id))
 
     @router.post('/test')
     def test(body: Target, request: Request):

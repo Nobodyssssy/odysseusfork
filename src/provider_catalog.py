@@ -86,6 +86,7 @@ class Entry:
     reachable: bool | None = None     # app-reported or probed; None = not checked
     reason: str = ''                  # non-secret explanation, e.g. an auth error class
     self_hosted: bool = False
+    key_source: str = ''              # Hermes only: where it keeps the key ('env_file', 'config_yaml', ...)
 
     @property
     def identity(self):
@@ -138,6 +139,27 @@ class SyncState:
         return {'version': 1, 'share': self.share, 'tombstones': self.tombstones, 'applied': self.applied}
 
 
+# Hermes providers whose API key may be copied to Odysseus on an explicit, confirmed request:
+# Hermes provider id -> names of the variable in Hermes's .env (canonical name first). This mirrors the Agent's own
+# provider registry; a provider that is not listed here is never copyable, whatever its key source.
+HERMES_KEY_ENV = {
+    'openrouter': ('OPENROUTER_API_KEY',),
+    'openai': ('OPENAI_API_KEY',),
+    'mistralai': ('MISTRAL_API_KEY',),
+    'x-ai': ('XAI_API_KEY',),
+    'nvidia': ('NVIDIA_API_KEY',),
+    'opencode-zen': ('OPENCODE_ZEN_API_KEY', 'OPENCODE_API_KEY'),
+    'opencode-go': ('OPENCODE_GO_API_KEY', 'OPENCODE_API_KEY'),
+}
+
+
+def key_copy_status(od, he):
+    """'available' | 'already' | 'unavailable' for the explicit "Copy key to Odysseus" action. Never looks at a key."""
+    if not he or he.auth != AUTH_KEY or not he.has_credential or he.key_source != 'env_file' or he.native_id not in HERMES_KEY_ENV:
+        return 'unavailable'
+    return 'already' if od and od.has_credential else 'available'
+
+
 def build_catalog(odysseus, hermes, state=None):
     """Merge both applications' entries into one view. Pure and idempotent."""
     state = state or SyncState()
@@ -168,6 +190,7 @@ def build_catalog(odysseus, hermes, state=None):
             'duplicates': found.get('odysseus_duplicates', 0) + found.get('hermes_duplicates', 0),
             'portable': portable,
             'share_enabled': shared_opt_in,
+            'key_copy': key_copy_status(od, he),
             'sync': sync_status(identity, od, he, portable, shared_opt_in, state),
         })
     return rows

@@ -1,7 +1,7 @@
 """Provider synchronization service: read-only discovery plus explicit, additive, opt-in mirroring.
 
 Rules enforced here (and tested):
-  * Credentials never enter this module. A mirrored provider is created WITHOUT a key; the
+  * Credentials never enter this module (the one explicit exception is delegated: see copy_key). A mirrored provider is created WITHOUT a key; the
     target reports `requires_authentication` until the user supplies one in that application.
   * OAuth, subscription and process-transport providers are never mirrored.
   * Mirroring is additive only. Nothing is overwritten, renamed, disabled or deleted, and a
@@ -18,7 +18,7 @@ import time
 
 from src.provider_adapters import KNOWN_OPENAI_COMPATIBLE, hermes_entries, odysseus_entries, probe_local_models
 from src.provider_catalog import (AUTH_KEY, AUTH_NONE, CONNECTED, OFFLINE, REQUIRES_AUTH, SyncState,
-                                  build_catalog, canonical_url, connection_state, is_loopback)
+                                  build_catalog, canonical_url, connection_state, is_loopback, key_copy_status)
 
 CACHE_SECONDS = 15
 
@@ -29,8 +29,10 @@ class SyncError(RuntimeError):
 
 class ProviderSync:
     def __init__(self, load_state, save_state, odysseus_rows, hermes_fetch, create_odysseus, append_hermes,
-                 probe=probe_local_models, clock=time.monotonic, on_odysseus_change=lambda: None, hermes_urls=lambda: {}):
+                 probe=probe_local_models, clock=time.monotonic, on_odysseus_change=lambda: None, hermes_urls=lambda: {},
+                 copy_key=None):
         self._load_state, self._save_state = load_state, save_state
+        self._copy_key = copy_key
         self._hermes_urls = hermes_urls
         self._odysseus_rows, self._hermes_fetch = odysseus_rows, hermes_fetch
         self._create_odysseus, self._append_hermes = create_odysseus, append_hermes
@@ -144,6 +146,34 @@ class ProviderSync:
                     self._on_change()
             self._cache = None
             return {'result': outcome, 'id': identity, 'target': target}
+
+    def copy_key(self, identity):
+        """Explicit, user-confirmed copy of ONE Hermes API key into Odysseus.
+
+        The key is read from Hermes's own store and written to Odysseus's encrypted store inside the injected
+        callable, so it never enters this class, a return value, the cache or a log. Never overwrites a key
+        Odysseus already has; Hermes keeps its own copy. OAuth/subscription logins are not eligible.
+        """
+        with self._lock:
+            od, he, _ = self._gather()
+            source = next((e for e in he if e.identity == identity), None)
+            target = next((e for e in od if e.identity == identity), None)
+            status = key_copy_status(target, source)
+            if status == 'already':
+                raise SyncError('Odysseus already has a key for this provider; it was not changed.')
+            if status != 'available':
+                raise SyncError('This key cannot be copied: the provider is unknown, login-based, or Hermes does not keep its key in its .env file.')
+            if self._copy_key is None:
+                raise SyncError('Key copying is not configured.')
+            outcome = self._copy_key(source.native_id, {'name': source.name, 'base_url': source.canonical, 'models': list(source.models)})
+            state = SyncState.load(self._load_state())
+            if outcome == 'created':
+                state.tombstones.pop(identity, None)
+                state.applied[identity] = {'target': 'odysseus', 'fingerprint': source.definition_fingerprint()}
+                self._save_state(state.dump())
+            self._cache = None
+            self._on_change()
+            return {'result': outcome, 'id': identity}
 
     def apply_all(self):
         results = []
