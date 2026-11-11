@@ -1,8 +1,8 @@
 diff --git a/api/routes.py b/api/routes.py
-index 017650278..7cf4d6434 100644
+index 017650278..bbc5d3c62 100644
 --- a/api/routes.py
 +++ b/api/routes.py
-@@ -18269,6 +18269,14 @@ def handle_get(handler, parsed) -> bool:
+@@ -18269,6 +18269,18 @@ def handle_get(handler, parsed) -> bool:
      if parsed.path == "/api/session/export":
          return _handle_session_export(handler, parsed)
  
@@ -14,21 +14,36 @@ index 017650278..7cf4d6434 100644
 +        from api import trusted_workspaces
 +        return j(handler, trusted_workspaces.check((parse_qs(parsed.query).get("path") or [""])[0]))
 +
++    if parsed.path == "/api/trusted-workspaces/requests":
++        from api import trusted_workspaces
++        return j(handler, {"requests": trusted_workspaces.pending(watch=True)})
++
      if parsed.path == "/api/workspaces":
          from api.profiles import get_active_profile_name
          active_profile = get_active_profile_name()
-@@ -21531,6 +21539,18 @@ def handle_post(handler, parsed) -> bool:
+@@ -21531,6 +21543,29 @@ def handle_post(handler, parsed) -> bool:
      if parsed.path == "/api/file/open-vscode":
          return _handle_file_open_vscode(handler, body)
  
 +    # ── Trusted Workspaces (POST): only a real browser interaction may approve or revoke ──
-+    if parsed.path in ("/api/trusted-workspaces/approve", "/api/trusted-workspaces/revoke"):
++    if parsed.path in (
++        "/api/trusted-workspaces/approve", "/api/trusted-workspaces/revoke", "/api/trusted-workspaces/decide",
++        "/api/trusted-workspaces/block", "/api/trusted-workspaces/unblock",
++    ):
 +        from api import trusted_workspaces
 +        if not _check_same_origin_browser_request(handler, require_provenance=True):
 +            return bad(handler, "Folder permissions can only be changed from the Hermes page in your browser.", 403)
 +        try:
 +            if parsed.path.endswith("/approve"):
 +                return j(handler, trusted_workspaces.approve(str(body.get("path") or ""), str(body.get("mode") or "")))
++            if parsed.path.endswith("/decide"):
++                return j(handler, trusted_workspaces.decide(
++                    str(body.get("id") or ""), str(body.get("decision") or ""),
++                    str(body.get("scope") or "folder"), str(body.get("note") or "")))
++            if parsed.path.endswith("/unblock"):
++                return j(handler, trusted_workspaces.unblock(str(body.get("path") or "")))
++            if parsed.path.endswith("/block"):
++                return j(handler, trusted_workspaces.block(str(body.get("path") or "")))
 +            return j(handler, trusted_workspaces.revoke(str(body.get("path") or "")))
 +        except trusted_workspaces.WorkspaceError as exc:
 +            return bad(handler, str(exc), 400)
@@ -38,10 +53,10 @@ index 017650278..7cf4d6434 100644
          return _handle_workspace_add(handler, body)
 diff --git a/api/trusted_workspaces.py b/api/trusted_workspaces.py
 new file mode 100644
-index 000000000..14a10af7f
+index 000000000..41c99ed8a
 --- /dev/null
 +++ b/api/trusted_workspaces.py
-@@ -0,0 +1,270 @@
+@@ -0,0 +1,553 @@
 +"""Trusted Workspaces: folders the user has approved for the Agent's file tools.
 +
 +How it works
@@ -72,14 +87,23 @@ index 000000000..14a10af7f
 +* Drive roots, the home folder, Hermes's own home (and anything containing it), system folders, UNC and
 +  NT-namespace paths are refused.
 +"""
++import collections
 +import json
 +import logging
 +import os
 +from pathlib import Path
++import re
 +import threading
 +import time
++import uuid
 +
 +logger = logging.getLogger(__name__)
++
++REQUEST_TTL = 120          # seconds a blocked write waits for the human before it is refused
++ATTENDED_WINDOW = 15       # a browser must have polled within this many seconds, else nobody can answer
++MAX_PENDING = 4            # cap on simultaneous prompts (a runaway loop cannot flood the page)
++REFUSAL_MEMORY = 300       # after "Deny", the same folder is refused without re-prompting for this long
++MAX_NOTE = 300
 +
 +ENV = 'HERMES_WRITE_SAFE_ROOT'
 +ENABLE_ENV = 'HERMES_WEBUI_TRUSTED_WORKSPACES'
@@ -89,6 +113,11 @@ index 000000000..14a10af7f
 +_ONCE = {}              # canonical path -> identity; lives for this process only
 +_STATE_FILE = None
 +_EMPTY_DIR = None
++_REQUESTS = {}          # id -> pending access request (a blocked write waiting for the human)
++_REFUSED = {}           # canonical folder -> (until, note) after the user said no
++_RECENT = collections.deque(maxlen=50)   # audit trail of decisions, newest last
++_LAST_POLL = 0.0        # monotonic time a browser last asked for pending requests
++_HOOKED = False
 +
 +
 +class WorkspaceError(ValueError):
@@ -173,10 +202,12 @@ index 000000000..14a10af7f
 +                _STATE_FILE.replace(_STATE_FILE.with_suffix('.corrupt'))   # keep what could not be read
 +            except OSError:
 +                pass
-+        return {'version': 1, 'always': []}
-+    items = data.get('always') if isinstance(data, dict) and data.get('version') == 1 else []
++        return {'version': 1, 'always': [], 'blocked': []}
++    valid = isinstance(data, dict) and data.get('version') == 1
++    items = data.get('always') if valid else []
 +    clean = [i for i in (items or []) if isinstance(i, dict) and isinstance(i.get('path'), str) and isinstance(i.get('id'), list)]
-+    return {'version': 1, 'always': clean}
++    blocked = [i for i in ((data.get('blocked') if valid else []) or []) if isinstance(i, dict) and isinstance(i.get('path'), str)]
++    return {'version': 1, 'always': clean, 'blocked': blocked}
 +
 +
 +def _write_state(state):
@@ -228,8 +259,11 @@ index 000000000..14a10af7f
 +        _EMPTY_DIR = home / 'vault' / 'webui-trusted-workspaces-empty'
 +        _BASE = tuple(launch)
 +        _ONCE.clear()
++        _REQUESTS.clear()
++        _REFUSED.clear()
 +        if _ENABLED:
 +            _apply()
++            install_hook()
 +            logger.info('Trusted Workspaces active: %d launch root(s), %d saved approval(s)', len(_BASE), len(_read_state()['always']))
 +        return _ENABLED
 +
@@ -244,6 +278,8 @@ index 000000000..14a10af7f
 +        if not _ENABLED:
 +            return True
 +        try:
++            if _blocked_match(path):
++                return False
 +            roots, _ = _live_roots()
 +            return any(_is_under(path, r) for r in [*(_BASE or ()), *roots])
 +        except OSError:
@@ -268,6 +304,9 @@ index 000000000..14a10af7f
 +            'always': [{'path': e['path'], 'added': e.get('added'), 'active': e['path'] in roots} for e in saved.values()],
 +            'once': sorted(_ONCE),
 +            'stale': stale,
++            'blocked': [e['path'] for e in _read_state()['blocked']] if _ENABLED else [],
++            'recent': list(_RECENT),
++            'prompts_active': _HOOKED,
 +            'note': 'Controls Hermes file tools only. It is not an operating-system sandbox.',
 +        }
 +
@@ -279,6 +318,8 @@ index 000000000..14a10af7f
 +        if not _ENABLED:
 +            raise WorkspaceError('Trusted Workspaces is not active for this Hermes.')
 +        canonical = canonicalize(path)
++        if _blocked_match(canonical):
++            raise WorkspaceError('That folder is on the "never allow" list. Remove it from there first.')
 +        if any(_is_under(canonical, r) for r in (_BASE or ())):
 +            return {'result': 'already_configured', 'path': canonical}
 +        ident = _identity(canonical)
@@ -312,6 +353,263 @@ index 000000000..14a10af7f
 +            removed = True
 +        _apply()
 +        return {'result': 'revoked' if removed else 'not_found', 'path': path}
++
++
++# --------------------------------------------------------------------------------------------------
++# "Never allow" list: deny always beats allow, whatever approved folder the path sits in.
++# --------------------------------------------------------------------------------------------------
++
++def _timestamp():
++    return time.strftime('%Y-%m-%dT%H:%M:%S')
++
++
++def _log(event, folder, verb, note=''):
++    _RECENT.append({'time': _timestamp(), 'event': event, 'folder': folder, 'verb': verb, 'note': note})
++
++
++def _blocked_match(path):
++    """The never-allow entry covering ``path``, or None."""
++    try:
++        for entry in _read_state()['blocked']:
++            if _is_under(path, entry['path']):
++                return entry['path']
++    except OSError:
++        return None
++    return None
++
++
++def block(path):
++    with _LOCK:
++        if not _ENABLED:
++            raise WorkspaceError('Trusted Workspaces is not active for this Hermes.')
++        raw = path.strip().strip('"') if isinstance(path, str) else ''
++        if not raw or '\x00' in raw or not os.path.isabs(raw) or raw.startswith(('\\\\', '//')):
++            raise WorkspaceError('Use a full local path, for example F:\\Project\\.env')
++        real = os.path.realpath(raw)
++        state = _read_state()
++        if not any(_norm(e['path']) == _norm(real) for e in state['blocked']):
++            state['blocked'].append({'path': real, 'added': _timestamp()})
++            _write_state(state)
++        _log('never-allow', real, '')
++        return {'result': 'blocked', 'path': real}
++
++
++def unblock(path):
++    with _LOCK:
++        if not _ENABLED:
++            raise WorkspaceError('Trusted Workspaces is not active for this Hermes.')
++        target = _norm(path) if isinstance(path, str) and path.strip() else ''
++        state = _read_state()
++        kept = [e for e in state['blocked'] if _norm(e['path']) != target]
++        removed = len(kept) != len(state['blocked'])
++        if removed:
++            state['blocked'] = kept
++            _write_state(state)
++            _log('unblocked', path, '')
++        return {'result': 'unblocked' if removed else 'not_found', 'path': path}
++
++
++# --------------------------------------------------------------------------------------------------
++# Inline access requests (the Claude Code / Codex style prompt).
++#
++# When a file tool is refused because its folder is not approved, the tool call does not simply fail:
++# it waits (up to REQUEST_TTL seconds) for the human to answer in the browser, then carries on, or is
++# refused with the human's reason. Only a click in the Hermes page can answer; the Agent has no tool
++# for it. With no browser attending, or when the Stop button is pressed, the request fails closed.
++# --------------------------------------------------------------------------------------------------
++
++def _existing_dir(path):
++    candidate = os.path.realpath(path)
++    if not os.path.isdir(candidate):
++        candidate = os.path.dirname(candidate)
++    while candidate and not os.path.isdir(candidate):
++        parent = os.path.dirname(candidate)
++        if parent == candidate:
++            return None
++        candidate = parent
++    return candidate or None
++
++
++def _repo_root(folder):
++    current = folder
++    while True:
++        if os.path.exists(os.path.join(current, '.git')):
++            return current
++        parent = os.path.dirname(current)
++        if parent == current:
++            return None
++        current = parent
++
++
++def _clean_note(note):
++    text = re.sub(r'[\x00-\x1f\x7f]+', ' ', note) if isinstance(note, str) else ''
++    return text.strip()[:MAX_NOTE]
++
++
++def _denied(verb, path, why):
++    return {'granted': False, 'message': f"{verb} denied: '{path}' {why}"}
++
++
++def _interrupted():
++    try:
++        from tools.interrupt import is_interrupted
++        return bool(is_interrupted())
++    except Exception:
++        return False
++
++
++def request_access(path, verb='Write'):
++    """Block the calling tool until the human answers.
++
++    Returns None when this feature has nothing to say, else {'granted': bool, 'message': str}.
++    """
++    if not _ENABLED:
++        return None
++    try:
++        located = _existing_dir(path)
++        if not located:
++            return _denied(verb, path, 'is in a location that does not exist.')
++        folder = canonicalize(located)
++    except WorkspaceError as exc:
++        _log('cannot-approve', str(path), verb, str(exc))
++        return _denied(verb, path, f'cannot be approved ({exc}). Tell the user; do not retry.')
++    except OSError:
++        return _denied(verb, path, 'could not be resolved.')
++    if _blocked_match(folder):
++        return _denied(verb, path, 'is on the user\'s never-allow list. Do not retry; ask the user.')
++
++    with _LOCK:
++        now = time.monotonic()
++        refused = _REFUSED.get(_norm(folder))
++        if refused and refused[0] > now:
++            reason = f' Reason from the user: "{refused[1]}".' if refused[1] else ''
++            return _denied(verb, path, f'the user already declined access to this folder.{reason} Do not ask again unless the user asks you to.')
++        request = next((r for r in _REQUESTS.values() if _norm(r['folder']) == _norm(folder) and r.get('decision') is None), None)
++        if request is None:
++            if now - _LAST_POLL > ATTENDED_WINDOW:
++                _log('unattended', folder, verb)
++                return _denied(verb, path, 'is outside the approved folders and no Hermes browser tab is open to approve it. Ask the user to approve the folder in Settings > Trusted folders.')
++            if len(_REQUESTS) >= MAX_PENDING:
++                return _denied(verb, path, 'needs approval but too many approvals are already waiting. Ask the user to answer them first.')
++            repo = _repo_root(folder)
++            try:
++                repo = canonicalize(repo) if repo and _norm(repo) != _norm(folder) else None
++            except WorkspaceError:
++                repo = None
++            request = {'id': uuid.uuid4().hex, 'folder': folder, 'repo': repo, 'file': str(path), 'verb': verb,
++                       'created': _timestamp(), 'deadline': now + REQUEST_TTL, 'event': threading.Event(), 'decision': None, 'note': ''}
++            _REQUESTS[request['id']] = request
++            _log('asked', folder, verb)
++
++    deadline = request['deadline']
++    while not request['event'].wait(0.5):
++        if time.monotonic() >= deadline or _interrupted():
++            break
++    with _LOCK:
++        _REQUESTS.pop(request['id'], None)
++        decision = request.get('decision')
++        if decision is None:
++            request['decision'] = 'expired'
++            _log('expired', folder, verb)
++    if decision == 'granted' and is_trusted(path):
++        return {'granted': True, 'message': ''}
++    if decision == 'denied':
++        reason = f' Reason from the user: "{request["note"]}".' if request.get('note') else ''
++        return _denied(verb, path, f'the user declined access to this folder.{reason} Do not retry; continue without it or ask the user.')
++    if decision is None:
++        return _denied(verb, path, f'needs the user\'s approval and none arrived within {REQUEST_TTL} seconds (or the run was stopped).')
++    return _denied(verb, path, 'is still outside the approved folders.')
++
++
++def pending(watch=True):
++    """Waiting requests, for the browser to show. ``watch`` records that a human is attending."""
++    global _LAST_POLL
++    with _LOCK:
++        now = time.monotonic()
++        if watch:
++            _LAST_POLL = now
++        return [{'id': r['id'], 'file': r['file'], 'verb': r['verb'], 'folder': r['folder'], 'repo': r['repo'],
++                 'created': r['created'], 'expires_in': max(0, int(r['deadline'] - now))}
++                for r in _REQUESTS.values() if r.get('decision') is None]
++
++
++def decide(request_id, decision, scope='folder', note=''):
++    """Answer a waiting request: once | always | deny | never. ``scope`` is 'folder' or 'repo'."""
++    if decision not in ('once', 'always', 'deny', 'never'):
++        raise WorkspaceError('Choose Allow once, Always allow, Deny or Never allow.')
++    with _LOCK:
++        request = _REQUESTS.get(request_id) if isinstance(request_id, str) else None
++        if request is None or request.get('decision') is not None:
++            raise WorkspaceError('That request is no longer waiting.')
++        target = request['repo'] if scope == 'repo' and request.get('repo') else request['folder']
++        text = _clean_note(note)
++        if decision in ('once', 'always'):
++            approve(target, decision)      # refuses blocked/forbidden folders; the request stays waiting on error
++            request['decision'] = 'granted'
++        else:
++            if decision == 'never':
++                block(target)
++            _REFUSED[_norm(request['folder'])] = (time.monotonic() + REFUSAL_MEMORY, text)
++            request['decision'] = 'denied'
++            request['note'] = text
++        _log(decision, target, request['verb'], text)
++        request['event'].set()
++        for other in _REQUESTS.values():      # one answer can settle other waiting requests it now covers
++            if other is request or other.get('decision') is not None:
++                continue
++            if _blocked_match(other['folder']):
++                other['decision'] = 'denied'
++            elif is_trusted(other['folder']):
++                other['decision'] = 'granted'
++            else:
++                continue
++            other['event'].set()
++        return {'result': decision, 'path': target}
++
++
++def _guard(original):
++    """Wrap the file tools' write guard so a refusal for an unapproved folder becomes a prompt."""
++    def guarded(path, *args, **kwargs):
++        message = original(path, *args, **kwargs)
++        verb = kwargs.get('verb', 'Write')
++        if message is None:
++            if _ENABLED and _blocked_match(path):
++                return f"{verb} denied: '{path}' is on the user's never-allow list. Do not retry; ask the user."
++            return None
++        if 'outside HERMES_WRITE_SAFE_ROOT' not in message:
++            return message                    # credential/protected-file denials are never promptable
++        try:
++            verdict = request_access(path, verb)
++        except Exception:
++            logger.exception('Trusted Workspaces: access request failed; keeping the original refusal')
++            return message
++        if verdict is None:
++            return message
++        if verdict['granted']:
++            return original(path, *args, **kwargs)
++        return verdict['message']
++    guarded._tw_guard = True
++    return guarded
++
++
++def install_hook():
++    """Wrap the write guard used by the file tools in this process. Fails soft: if the Agent's module
++    layout is not as expected nothing prompts and the plain refusal remains."""
++    global _HOOKED
++    try:
++        from tools import file_operations
++    except Exception as exc:
++        logger.warning('Trusted Workspaces: inline prompts unavailable (%s)', exc)
++        _HOOKED = False
++        return False
++    current = getattr(file_operations, 'get_write_denied_error', None)
++    if current is None:
++        _HOOKED = False
++        return False
++    if not getattr(current, '_tw_guard', False):
++        file_operations.get_write_denied_error = _guard(current)
++    _HOOKED = True
++    return True
 diff --git a/server.py b/server.py
 index adff2c140..332f42bd6 100644
 --- a/server.py
@@ -344,10 +642,10 @@ index 902b2843e..37a764982 100644
  <script src="static/commands.js?v=__WEBUI_VERSION__" defer></script>
 diff --git a/static/trusted-workspaces.js b/static/trusted-workspaces.js
 new file mode 100644
-index 000000000..13e29b215
+index 000000000..db29219e1
 --- /dev/null
 +++ b/static/trusted-workspaces.js
-@@ -0,0 +1,167 @@
+@@ -0,0 +1,298 @@
 +/* Trusted Workspaces: asks before Hermes's file tools may write in a newly chosen folder.
 + * A permission for Hermes's file tools only; it is not an operating-system sandbox.
 + * Approvals are made only from a click in this dialog. */
@@ -467,6 +765,113 @@ index 000000000..13e29b215
 +    return nativeFetch(input, init);
 +  };
 +
++  /* Inline requests: a file tool was refused for an unapproved folder and is waiting for this answer.
++   * The tool continues after Allow, or is told why after Deny. Polling also tells the server a person is here. */
++  const answered = new Set();
++  let current = null;                       // { id, close } while a request dialog is open
++
++  function askAccess(request) {
++    return new Promise(resolve => {
++      const previous = document.activeElement;
++      const overlay = el('div', { id: 'trusted-workspaces-request' });
++      overlay.style.cssText = 'position:fixed;inset:0;z-index:100001;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;font:14px system-ui,sans-serif';
++      const box = el('div', { role: 'alertdialog' });
++      box.setAttribute('aria-modal', 'true');
++      box.style.cssText = 'max-width:600px;width:calc(100% - 32px);background:var(--bg,#1f2124);color:var(--text,#e8e4db);border:1px solid var(--border,#484848);border-radius:10px;padding:20px;box-shadow:0 10px 40px rgba(0,0,0,.5)';
++      const code = text => { const c = el('code', { textContent: text }); c.style.cssText = 'display:block;margin:6px 0 10px;padding:8px 10px;border-radius:6px;background:rgba(127,127,127,.18);word-break:break-all;user-select:all'; return c; };
++      const choices = [{ value: 'folder', label: 'This folder', path: request.folder }];
++      if (request.repo) choices.push({ value: 'repo', label: 'The whole repository', path: request.repo });
++      let scope = 'folder';
++      const scopeBox = el('div', {});
++      scopeBox.style.cssText = 'margin:6px 0 10px';
++      for (const choice of choices) {
++        const radio = el('input', { type: 'radio', name: 'tw-scope', value: choice.value, checked: choice.value === 'folder' });
++        radio.addEventListener('change', () => { scope = choice.value; });
++        const line = el('label', {}, radio, el('span', { textContent: ' ' + choice.label + ': ' }), el('code', { textContent: choice.path }));
++        line.style.cssText = 'display:block;margin:3px 0;word-break:break-all';
++        scopeBox.append(line);
++      }
++      const note = el('textarea', { placeholder: 'Optional note to Hermes (sent with Deny / Never allow)', rows: 2, maxLength: 300 });
++      note.style.cssText = 'width:100%;box-sizing:border-box;padding:6px 8px;border-radius:6px;border:1px solid var(--border,#484848);background:transparent;color:inherit;font:inherit;resize:vertical';
++      const status = el('div', { role: 'status' });
++      const timer = el('div', { textContent: '' });
++      timer.style.cssText = 'font-size:12px;opacity:.7;margin-top:6px';
++      const button = (label, decision, primary) => {
++        const b = el('button', { type: 'button', textContent: label });
++        b.style.cssText = 'padding:8px 14px;border-radius:7px;border:1px solid var(--border,#484848);background:' + (primary ? '#2d6a4f' : 'transparent') + ';color:inherit;cursor:pointer;font:inherit';
++        b.dataset.decision = decision;
++        return b;
++      };
++      const buttons = [button('Never allow', 'never'), button('Deny', 'deny'), button('Allow once', 'once'), button('Always allow', 'always', true)];
++      const row = el('div', {}, ...buttons);
++      row.style.cssText = 'display:flex;gap:8px;justify-content:flex-end;margin-top:12px;flex-wrap:wrap';
++      const title = el('h2', { textContent: 'Hermes wants to ' + String(request.verb || 'write').toLowerCase() + ' a file outside your approved folders' });
++      title.style.cssText = 'margin:0 0 8px;font-size:17px';
++      box.append(title, code(request.file),
++        el('div', { textContent: 'Allow Hermes\'s file tools to change files in:' }), scopeBox, note,
++        el('div', { textContent: 'The Hermes run is paused until you answer. Allow once lasts until Hermes restarts. This controls Hermes\'s file tools only; it is not an operating-system sandbox.' }),
++        status, timer, row);
++      overlay.append(box);
++      document.body.append(overlay);
++      buttons[1].focus();
++
++      let left = request.expires_in;
++      const tick = setInterval(() => {
++        left -= 1;
++        timer.textContent = left > 0 ? 'Hermes stops waiting in ' + left + ' s.' : 'Hermes stopped waiting.';
++        if (left <= -3) close();
++      }, 1000);
++      timer.textContent = 'Hermes stops waiting in ' + left + ' s.';
++      const close = () => {
++        clearInterval(tick); overlay.remove(); document.removeEventListener('keydown', onKey, true);
++        current = null; if (previous && previous.focus) previous.focus(); resolve();
++      };
++      const onKey = event => {
++        if (event.key === 'Escape') { event.preventDefault(); send('deny'); }
++        if (event.key === 'Tab') {
++          const index = buttons.indexOf(document.activeElement);
++          event.preventDefault();
++          buttons[(index + (event.shiftKey ? buttons.length - 1 : 1)) % buttons.length].focus();
++        }
++      };
++      document.addEventListener('keydown', onKey, true);
++      current = { id: request.id, close };
++      const send = async (decision, event) => {
++        if (event && !event.isTrusted) return;        // only a real click or key can answer
++        for (const b of buttons) b.disabled = true;
++        const r = await json('api/trusted-workspaces/decide', { method: 'POST', body: JSON.stringify({ id: request.id, decision, scope, note: note.value }) });
++        if (r.ok) return close();
++        status.textContent = r.data.error || 'The answer could not be saved.';
++        if (/no longer waiting/.test(status.textContent)) return setTimeout(close, 1500);
++        for (const b of buttons) b.disabled = false;
++      };
++      for (const b of buttons) b.addEventListener('click', event => send(b.dataset.decision, event));
++    });
++  }
++
++  const flagTitle = on => {
++    const clean = document.title.replace(/^\(!\) /, '');
++    if (on && !document.title.startsWith('(!) ')) document.title = '(!) ' + clean;
++    if (!on) document.title = clean;
++  };
++
++  async function watch() {
++    if (!enabled) return;
++    const r = await json('api/trusted-workspaces/requests');
++    if (r.status === 404) { clearInterval(watcher); return; }   // this server predates inline prompts: stay quiet
++    const waiting = r.ok ? (r.data.requests || []) : [];
++    flagTitle(waiting.length > 0);
++    if (current && !waiting.some(q => q.id === current.id)) current.close();   // run stopped or Hermes gave up
++    if (current) return;
++    const next = waiting.find(q => !answered.has(q.id));
++    if (!next) return;
++    answered.add(next.id);
++    await askAccess(next);
++  }
++
++  let watcher = null;
++  ready.then(() => { if (enabled) watcher = setInterval(() => { watch().catch(() => {}); }, 2000); });
++
 +  /* Settings > Preferences > "Trusted folders": list and revoke, inline. */
 +  const SECTION_ID = 'trusted-folders-section';
 +
@@ -481,30 +886,54 @@ index 000000000..13e29b215
 +    }
 +    const r = await json('api/trusted-workspaces');
 +    const rows = [];
-+    const row = (path, kind, removable) => {
++    const row = (path, kind, removable, endpoint = 'revoke', label = 'Revoke') => {
 +      const line = el('div', {}, el('code', { textContent: path }), el('span', { textContent: ' ' + kind }));
 +      line.style.cssText = 'display:flex;align-items:center;gap:8px;justify-content:space-between;padding:5px 0;border-bottom:1px solid rgba(127,127,127,.25);word-break:break-all;font-size:12px';
 +      if (removable) {
-+        const b = el('button', { type: 'button', textContent: 'Revoke', className: 'sm-btn' });
++        const b = el('button', { type: 'button', textContent: label, className: 'sm-btn' });
 +        b.addEventListener('click', async event => {
 +          if (!event.isTrusted) return;
 +          b.disabled = true;
-+          const res = await json('api/trusted-workspaces/revoke', { method: 'POST', body: JSON.stringify({ path }) });
++          const res = await json('api/trusted-workspaces/' + endpoint, { method: 'POST', body: JSON.stringify({ path }) });
 +          if (res.ok) renderSettings(); else { b.disabled = false; b.textContent = res.data.error || 'Failed'; }
 +        });
 +        line.append(b);
 +      }
-+      rows.push(line);
++      return line;
 +    };
++    const sub = text => { const d = el('label', { textContent: text }); d.style.cssText = 'display:block;margin-top:10px'; return d; };
++    const small = text => { const d = el('div', { textContent: text }); d.style.cssText = 'font-size:11px;color:var(--muted);margin:2px 0 6px'; return d; };
++    const blockedRows = [];
++    const recentRows = [];
 +    if (r.ok && r.data.enabled) {
-+      for (const path of r.data.configured) row(path, '(set when Hermes starts; cannot be revoked here)', false);
-+      for (const item of r.data.always) row(item.path, item.active ? '(always)' : '(always; folder changed, needs re-approval)', true);
-+      for (const path of r.data.once) row(path, '(until Hermes restarts)', true);
++      for (const path of r.data.configured) rows.push(row(path, '(set when Hermes starts; cannot be revoked here)', false));
++      for (const item of r.data.always) rows.push(row(item.path, item.active ? '(always)' : '(always; folder changed, needs re-approval)', true));
++      for (const path of r.data.once) rows.push(row(path, '(until Hermes restarts)', true));
 +      if (!rows.length) rows.push(el('div', { textContent: 'No folders are trusted. Hermes cannot write anywhere until you approve one.' }));
++      for (const path of r.data.blocked || []) blockedRows.push(row(path, '(never allowed)', true, 'unblock', 'Allow again'));
++      for (const item of (r.data.recent || []).slice(-8).reverse()) {
++        const line = el('div', { textContent: item.time.replace('T', ' ') + '  ' + item.event + '  ' + item.folder + (item.note ? '  "' + item.note + '"' : '') });
++        line.style.cssText = 'font-size:11px;padding:2px 0;word-break:break-all;opacity:.85';
++        recentRows.push(line);
++      }
 +    }
 +    const hint = el('div', { textContent: "Folders Hermes's file tools may write in. This is a permission for those tools only, not an operating-system sandbox." });
 +    hint.style.cssText = 'font-size:11px;color:var(--muted);margin-bottom:6px';
-+    section.replaceChildren(el('label', { textContent: 'Trusted folders' }), hint, ...rows);
++    const input = el('input', { type: 'text', placeholder: 'Never allow a folder or file, e.g. F:\\Project\\.env' });
++    input.style.cssText = 'flex:1;min-width:0;padding:5px 8px;border-radius:6px;border:1px solid var(--border,#484848);background:transparent;color:inherit;font:inherit';
++    const addBlock = el('button', { type: 'button', textContent: 'Never allow', className: 'sm-btn' });
++    addBlock.addEventListener('click', async event => {
++      if (!event.isTrusted || !input.value.trim()) return;
++      const res = await json('api/trusted-workspaces/block', { method: 'POST', body: JSON.stringify({ path: input.value }) });
++      if (res.ok) renderSettings(); else addBlock.textContent = res.data.error || 'Failed';
++    });
++    const adder = el('div', {}, input, addBlock);
++    adder.style.cssText = 'display:flex;gap:8px;margin-top:6px';
++    const parts = [el('label', { textContent: 'Trusted folders' }), hint, ...rows,
++      sub('Never allowed'), small('Always refused, even inside a trusted folder. Deny beats allow.'), ...blockedRows, adder];
++    if (r.ok && r.data.enabled && r.data.prompts_active === false) parts.push(small('Inline approval prompts are not active in this Hermes build; folders can still be approved here.'));
++    if (recentRows.length) parts.push(sub('Recent decisions'), ...recentRows);
++    section.replaceChildren(...parts);
 +  }
 +
 +  window.refreshTrustedFolders = renderSettings;
@@ -515,3 +944,289 @@ index 000000000..13e29b215
 +    if (pane) new MutationObserver(() => { if (pane.classList.contains('active')) renderSettings(); }).observe(pane, { attributes: true, attributeFilter: ['class'] });
 +  });
 +})();
+diff --git a/tests/test_trusted_workspaces_prompts.py b/tests/test_trusted_workspaces_prompts.py
+new file mode 100644
+index 000000000..1037c4b8c
+--- /dev/null
++++ b/tests/test_trusted_workspaces_prompts.py
+@@ -0,0 +1,280 @@
++"""Inline approval prompts for Trusted Workspaces.
++
++A file tool refused for an unapproved folder waits for the human, then proceeds or is refused with the
++human's reason. These tests drive the real module with a stand-in for the Agent's write guard that emits
++the same refusal text, plus one test against the Agent's real ``tools.file_operations`` when importable.
++"""
++import os
++import shutil
++import sys
++import tempfile
++import threading
++import time
++import unittest
++from pathlib import Path
++
++ROOT = Path(__file__).resolve().parent.parent
++if str(ROOT) not in sys.path:
++    sys.path.insert(0, str(ROOT))
++
++from api import trusted_workspaces as tw  # noqa: E402
++
++
++def fake_agent_guard(path, *, verb='Write', entry=False):
++    """Same contract and refusal text as agent.file_safety.get_write_denied_error for the safe-root case."""
++    roots = [r for r in os.environ.get(tw.ENV, '').split(os.pathsep) if r]
++    if roots and not any(tw._is_under(path, r) for r in roots):
++        return f"{verb} denied: '{path}' is outside HERMES_WRITE_SAFE_ROOT ({os.pathsep.join(roots)}). Unset the variable."
++    if 'credential' in str(path):
++        return f"{verb} denied: '{path}' is a protected system/credential file."
++    return None
++
++
++def answer_when_asked(decision, results, **kwargs):
++    """Play the human: wait for a prompt to appear, answer it."""
++    def run():
++        for _ in range(100):
++            waiting = tw.pending(watch=True)
++            if waiting:
++                try:
++                    results.append(tw.decide(waiting[0]['id'], decision, **kwargs))
++                except Exception as exc:       # noqa: BLE001 - recorded for the assertion
++                    results.append(exc)
++                return
++            time.sleep(0.05)
++        results.append(None)
++    thread = threading.Thread(target=run, daemon=True)
++    thread.start()
++    return thread
++
++
++class PromptTests(unittest.TestCase):
++    def setUp(self):
++        self.tmp = Path(tempfile.mkdtemp(prefix='tw-test-')).resolve()
++        self.base = self.tmp / 'base'
++        self.work = self.tmp / 'work'
++        for d in (self.base, self.work / 'repo' / 'src', self.work / 'repo' / 'docs', self.work / 'plain'):
++            d.mkdir(parents=True)
++        (self.work / 'repo' / '.git').mkdir()
++        self.saved_env = os.environ.get(tw.ENV)
++        os.environ[tw.ENV] = str(self.base)
++        self.saved = (tw._hermes_home, tw.install_hook, tw.REQUEST_TTL, tw.REFUSAL_MEMORY, tw.MAX_PENDING)
++        tw._hermes_home = lambda: self.tmp / '_hermes_home'
++        tw.install_hook = lambda: False
++        tw._RECENT.clear()
++        tw._LAST_POLL = 0.0
++        self.assertTrue(tw.init())
++        self.guard = tw._guard(fake_agent_guard)
++
++    def tearDown(self):
++        tw._hermes_home, tw.install_hook, tw.REQUEST_TTL, tw.REFUSAL_MEMORY, tw.MAX_PENDING = self.saved
++        tw._REQUESTS.clear()
++        tw._REFUSED.clear()
++        if self.saved_env is None:
++            os.environ.pop(tw.ENV, None)
++        else:
++            os.environ[tw.ENV] = self.saved_env
++        shutil.rmtree(self.tmp, ignore_errors=True)
++
++    def target(self, *parts):
++        return str(self.work.joinpath(*parts))
++
++    # -- the prompt itself ---------------------------------------------------------------------
++    def test_allow_once_lets_the_blocked_write_continue(self):
++        results = []
++        human = answer_when_asked('once', results)
++        verdict = self.guard(self.target('plain', 'a.txt'))
++        human.join(2)
++        self.assertIsNone(verdict, 'the write must proceed after approval')
++        self.assertEqual(results[0]['result'], 'once')
++        self.assertIsNone(self.guard(self.target('plain', 'b.txt')), 'no second prompt for the same folder')
++        self.assertIn(str(self.work / 'plain'), os.environ[tw.ENV])
++
++    def test_always_allow_is_saved_for_the_next_start(self):
++        results = []
++        human = answer_when_asked('always', results)
++        self.assertIsNone(self.guard(self.target('plain', 'a.txt')))
++        human.join(2)
++        self.assertEqual([e['path'] for e in tw._read_state()['always']], [str(self.work / 'plain')])
++        tw.init()                                   # simulated restart
++        self.assertIsNone(self.guard(self.target('plain', 'c.txt')))
++
++    def test_repository_scope_approves_the_whole_repo(self):
++        results = []
++        human = answer_when_asked('always', results, scope='repo')
++        self.assertIsNone(self.guard(self.target('repo', 'src', 'main.rs')))
++        human.join(2)
++        self.assertEqual(results[0]['path'], str(self.work / 'repo'))
++        self.assertIsNone(self.guard(self.target('repo', 'docs', 'readme.md')), 'sibling folder is covered')
++
++    def test_prompt_offers_the_repo_root_only_inside_a_repo(self):
++        seen = []
++
++        def look():
++            for _ in range(100):
++                waiting = tw.pending(watch=True)
++                if waiting:
++                    seen.append(waiting[0])
++                    tw.decide(waiting[0]['id'], 'deny')
++                    return
++                time.sleep(0.05)
++
++        for target in (self.target('repo', 'src', 'main.rs'), self.target('plain', 'a.txt')):
++            thread = threading.Thread(target=look, daemon=True)
++            thread.start()
++            self.guard(target)
++            thread.join(2)
++        self.assertEqual(seen[0]['repo'], str(self.work / 'repo'))
++        self.assertEqual(seen[0]['folder'], str(self.work / 'repo' / 'src'))
++        self.assertIsNone(seen[1]['repo'])
++
++    def test_deny_gives_the_agent_the_reason_and_stops_reprompting(self):
++        results = []
++        human = answer_when_asked('deny', results, note='that is my tax folder')
++        message = self.guard(self.target('plain', 'a.txt'))
++        human.join(2)
++        self.assertIn('declined', message)
++        self.assertIn('that is my tax folder', message)
++        started = time.monotonic()
++        again = self.guard(self.target('plain', 'b.txt'))
++        self.assertLess(time.monotonic() - started, 0.5, 'a repeat after Deny must not wait or prompt')
++        self.assertIn('already declined', again)
++        self.assertEqual(tw.pending(), [])
++
++    def test_never_allow_blocks_and_beats_an_approved_parent(self):
++        os.environ[tw.ENV] = os.pathsep.join([str(self.base), str(self.work)])
++        tw.init()
++        guard = tw._guard(fake_agent_guard)
++        self.assertIsNone(guard(self.target('plain', 'ok.txt')))
++        tw.block(self.target('plain'))
++        self.assertIn('never-allow', guard(self.target('plain', 'ok.txt')))
++        self.assertIsNone(guard(self.target('repo', 'src', 'ok.txt')), 'other folders stay allowed')
++        tw.unblock(self.target('plain'))
++        self.assertIsNone(guard(self.target('plain', 'ok.txt')))
++
++    def test_never_from_the_prompt_blocks_the_folder(self):
++        results = []
++        human = answer_when_asked('never', results)
++        message = self.guard(self.target('plain', 'a.txt'))
++        human.join(2)
++        self.assertIn('declined', message)
++        self.assertEqual(tw.status()['blocked'], [str(self.work / 'plain')])
++        with self.assertRaises(tw.WorkspaceError):
++            tw.approve(self.target('plain'), 'always')
++
++    # -- failing closed ------------------------------------------------------------------------
++    def test_no_browser_attending_fails_closed_at_once(self):
++        started = time.monotonic()
++        message = self.guard(self.target('plain', 'a.txt'))
++        self.assertLess(time.monotonic() - started, 0.5)
++        self.assertIn('no Hermes browser tab', message)
++        self.assertEqual(tw.pending(watch=False), [])
++
++    def test_unanswered_prompt_expires_and_refuses(self):
++        tw.REQUEST_TTL = 1
++        tw.pending(watch=True)
++        started = time.monotonic()
++        message = self.guard(self.target('plain', 'a.txt'))
++        self.assertLess(time.monotonic() - started, 4)
++        self.assertIn('none arrived', message)
++        self.assertEqual(tw.pending(watch=False), [])
++        self.assertNotIn(str(self.work / 'plain'), os.environ[tw.ENV])
++
++    def test_folders_that_can_never_be_approved_are_not_offered(self):
++        tw.pending(watch=True)
++        message = self.guard(str(Path.home() / 'notes.txt'))
++        self.assertIn('cannot be approved', message)
++        self.assertEqual(tw.pending(watch=False), [])
++
++    def test_credential_denials_are_never_promptable(self):
++        tw.pending(watch=True)
++        message = self.guard(str(self.base / 'credential-file'))
++        self.assertIn('protected system/credential file', message)
++        self.assertEqual(tw.pending(watch=False), [])
++
++    def test_concurrent_requests_for_one_folder_share_one_prompt(self):
++        tw.pending(watch=True)
++        outcomes = []
++        workers = [threading.Thread(target=lambda n=n: outcomes.append(self.guard(self.target('plain', f'{n}.txt')))) for n in range(3)]
++        for w in workers:
++            w.start()
++        time.sleep(0.4)
++        waiting = tw.pending(watch=True)
++        self.assertEqual(len(waiting), 1)
++        tw.decide(waiting[0]['id'], 'once')
++        for w in workers:
++            w.join(3)
++        self.assertEqual(outcomes, [None, None, None])
++
++    def test_prompt_flood_is_capped(self):
++        tw.MAX_PENDING = 2
++        tw.pending(watch=True)
++        workers = [threading.Thread(target=lambda n=n: self.guard(self.target('plain', f'{n}', 'x.txt')), daemon=True) for n in range(2)]
++        for n in range(2):
++            (self.work / 'plain' / str(n)).mkdir(exist_ok=True)
++        for w in workers:
++            w.start()
++        time.sleep(0.4)
++        (self.work / 'plain' / 'third').mkdir()
++        message = self.guard(self.target('plain', 'third', 'x.txt'))
++        self.assertIn('too many approvals', message)
++        for item in tw.pending(watch=True):
++            tw.decide(item['id'], 'deny')
++
++    def test_one_answer_settles_other_waiting_requests_it_covers(self):
++        tw.pending(watch=True)
++        outcomes = []
++        for sub in ('src', 'docs'):
++            threading.Thread(target=lambda s=sub: outcomes.append(self.guard(self.target('repo', s, 'f.txt'))), daemon=True).start()
++        time.sleep(0.5)
++        waiting = tw.pending(watch=True)
++        self.assertEqual(len(waiting), 2)
++        tw.decide(waiting[0]['id'], 'once', scope='repo')
++        time.sleep(1.0)
++        self.assertEqual(outcomes, [None, None], 'the repo approval releases both')
++
++    # -- answering is validated ----------------------------------------------------------------
++    def test_decide_rejects_bad_input_and_stale_ids(self):
++        with self.assertRaises(tw.WorkspaceError):
++            tw.decide('nope', 'once')
++        with self.assertRaises(tw.WorkspaceError):
++            tw.decide('nope', 'maybe')
++
++    def test_note_is_cleaned_and_bounded(self):
++        results = []
++        human = answer_when_asked('deny', results, note='line1\nline2\x00' + 'x' * 1000)
++        message = self.guard(self.target('plain', 'a.txt'))
++        human.join(2)
++        self.assertNotIn('\n', message)
++        self.assertLess(len(message), 700)
++
++    def test_state_file_keeps_blocked_entries_across_approvals(self):
++        tw.block(self.target('plain'))
++        tw.approve(self.target('repo'), 'always')
++        state = tw._read_state()
++        self.assertEqual(len(state['always']), 1)
++        self.assertEqual(len(state['blocked']), 1)
++
++    # -- the real Agent module ----------------------------------------------------------------
++    def test_hook_wraps_the_agents_real_write_guard_once(self):
++        tw.install_hook = self.saved[1]
++        try:
++            from tools import file_operations
++        except Exception:
++            self.skipTest('Hermes Agent modules are not importable in this interpreter')
++        original = file_operations.get_write_denied_error
++        try:
++            self.assertTrue(tw.install_hook())
++            self.assertTrue(tw.install_hook())
++            wrapped = file_operations.get_write_denied_error
++            self.assertTrue(getattr(wrapped, '_tw_guard', False))
++            self.assertFalse(getattr(getattr(wrapped, '__wrapped__', None), '_tw_guard', False))
++            message = wrapped(self.target('plain', 'a.txt'))
++            self.assertIn('no Hermes browser tab', message)
++            self.assertIsNone(wrapped(str(self.base / 'ok.txt')))
++        finally:
++            file_operations.get_write_denied_error = original
++
++
++if __name__ == '__main__':
++    unittest.main()
