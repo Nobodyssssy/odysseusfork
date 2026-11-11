@@ -2580,6 +2580,17 @@
             </div>
             <div id="adm-backupMsg" style="margin-top:6px;"></div>
           </div>
+          <div class="admin-card" id="adm-fullBackupCard" style="display:none">
+            <h2>Full Backup (Odysseus + Hermes)</h2>
+            <div class="admin-toggle-sub" style="margin-bottom:8px">A verified snapshot of everything: your Odysseus data and settings, Hermes sessions, memories, skills, plugins and config, the Hermes link settings, and the Windows startup tasks. Saved outside the app folders; it contains your API keys, so keep that folder private. Restoring is done offline from a terminal, with everything stopped.</div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+              <button class="admin-btn-add" id="adm-fullBackupBtn">Create full backup</button>
+              <span id="adm-fullBackupDir" class="admin-toggle-sub"></span>
+            </div>
+            <div id="adm-fullBackupMsg" style="margin-top:6px;"></div>
+            <div id="adm-fullBackupList" style="margin-top:6px;"></div>
+            <div id="adm-fullBackupHelp" class="admin-toggle-sub" style="margin-top:6px;"></div>
+          </div>
           <div class="admin-card admin-danger-card">
             <h2 style="color:#e55;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px;opacity:0.75"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>Danger Zone</h2>
             <div class="admin-toggle-sub" style="margin-bottom:8px">Irreversible. Each wipe targets one category — pick exactly what you want gone.</div>

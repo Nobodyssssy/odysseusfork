@@ -3762,6 +3762,71 @@ function initBackup() {
   });
 }
 
+/* ── Full backup (Odysseus + Hermes) ── */
+function initFullBackup() {
+  const card = el('adm-fullBackupCard');
+  if (!card) return;
+  const btn = el('adm-fullBackupBtn'), msg = el('adm-fullBackupMsg'), list = el('adm-fullBackupList');
+  const fmt = n => n >= 1073741824 ? (n / 1073741824).toFixed(1) + ' GB' : n >= 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(n / 1024)) + ' KB';
+  let timer = null;
+
+  async function refresh() {
+    let data;
+    try {
+      const res = await fetch('/api/backup/full', { credentials: 'same-origin' });
+      if (!res.ok) { card.style.display = 'none'; return false; }     // older server or not a local admin: stay hidden
+      data = await res.json();
+    } catch (_) { card.style.display = 'none'; return false; }
+    card.style.display = '';
+    el('adm-fullBackupDir').textContent = data.backup_dir + (data.includes_hermes ? '' : ' (Hermes not found: Odysseus only)');
+    el('adm-fullBackupHelp').textContent = 'Restore: ' + data.restore_help;
+    btn.disabled = !!data.job.running;
+    btn.textContent = data.job.running ? 'Backing up...' : 'Create full backup';
+    if (data.job.error) { msg.textContent = 'Backup failed: ' + data.job.error; msg.className = 'admin-error'; }
+    else if (data.job.result && !data.job.running) { msg.textContent = `Backup verified: ${data.job.result.files} files, ${fmt(data.job.result.bytes)}, ${data.job.result.databases} databases.`; msg.className = 'admin-success'; }
+    list.replaceChildren(...data.backups.map(b => {
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:3px 0;font-size:12px';
+      const label = document.createElement('code');
+      label.textContent = b.name;
+      const info = document.createElement('span');
+      info.textContent = `${b.created_at ? b.created_at.slice(0, 16).replace('T', ' ') : '?'} · ${b.files} files · ${fmt(b.bytes)} · ${b.hermes ? 'Odysseus + Hermes' : 'Odysseus only'}${b.kind === 'prerestore' ? ' · taken before a restore' : ''}`;
+      const verify = document.createElement('button');
+      verify.className = 'admin-btn-add';
+      verify.textContent = 'Verify';
+      verify.addEventListener('click', async () => {
+        verify.disabled = true; verify.textContent = 'Verifying...';
+        try {
+          const r = await fetch('/api/backup/full/verify', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: b.name }) });
+          const d = await r.json().catch(() => ({}));
+          verify.textContent = r.ok ? 'Verified OK' : (d.detail || 'Failed');
+        } catch (e) { verify.textContent = 'Failed'; }
+        setTimeout(() => { verify.textContent = 'Verify'; verify.disabled = false; }, 4000);
+      });
+      row.append(label, info, verify);
+      return row;
+    }));
+    return data.job.running;
+  }
+
+  async function poll() {
+    clearTimeout(timer);
+    const running = await refresh();
+    if (running) timer = setTimeout(poll, 3000);
+  }
+
+  btn.addEventListener('click', async () => {
+    btn.disabled = true; msg.textContent = ''; msg.className = '';
+    try {
+      const res = await fetch('/api/backup/full', { method: 'POST', credentials: 'same-origin' });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(d.detail || 'Backup could not start');
+    } catch (e) { msg.textContent = e.message; msg.className = 'admin-error'; }
+    poll();
+  });
+  poll();
+}
+
 /* ── Danger Zone ── */
 function initDangerZone() {
   // Per-category Danger Zone wipes. Each button declares its target
@@ -4176,7 +4241,7 @@ function initAll() {
   modalEl = el('settings-modal');
   const inits = [
     initSignupToggle, initShareDefaultsToggle, initAddUser, initEndpointForm, initMcpForm,
-    initCalDAV, initBackup, initDangerZone, initTokenForm, initLogsView,
+    initCalDAV, initBackup, initFullBackup, initDangerZone, initTokenForm, initLogsView,
     () => settingsModule.initIntegrations()
   ];
   for (const fn of inits) {
