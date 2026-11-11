@@ -1,0 +1,451 @@
+diff --git a/hermes_cli/web_route_guard.py b/hermes_cli/web_route_guard.py
+new file mode 100644
+index 0000000000..55441f9a68
+--- /dev/null
++++ b/hermes_cli/web_route_guard.py
+@@ -0,0 +1,109 @@
++"""Route guard for the Webapp's direct file, Git and MCP routes (Odysseus reviewed patch).
++
++The agent's file tools consult ``agent.file_safety`` (protected Hermes state, credentials, ``HERMES_WRITE_SAFE_ROOT``). The Webapp's direct REST routes
++(``/api/fs/write-text``, ``/api/files/*``, ``/api/git/*``, ``/api/mcp/*``) did not, so anything holding the Webapp credential could write or delete outside the
++safe root, replace plugin or config files, read the Webapp's own credential and register an arbitrary command as an MCP server. These helpers apply the SAME
++verdicts to those routes. They add no approval prompt: a REST call cannot tell a human click from a script, so this is a policy boundary, not a consent step.
++
++Not a sandbox: it does not stop a process that can already run commands as this user. Raise the cost of the web/token vector and keep parity with the agent guard.
++"""
++import os
++import re
++from pathlib import Path
++from typing import Optional
++
++from fastapi import HTTPException
++
++from agent import file_safety
++
++# Hermes-home entries that hold code or security settings which run or govern the next start. The agent guard leaves some of them editable on purpose (a user may
++# ask the agent to edit config.yaml); the direct routes are not a conversation, so they stay closed.
++_CONTROL_NAMES = ("plugins", "hooks", "desktop-plugins", "config.yaml", "cron")
++
++_SHELLS = frozenset({
++    "cmd", "cmd.exe", "powershell", "powershell.exe", "pwsh", "pwsh.exe", "bash", "bash.exe", "sh", "sh.exe", "zsh", "fish", "wscript", "wscript.exe",
++    "cscript", "cscript.exe", "mshta", "mshta.exe", "rundll32", "rundll32.exe", "regsvr32", "regsvr32.exe", "wsl", "wsl.exe", "msiexec", "msiexec.exe",
++    "certutil", "certutil.exe", "bitsadmin", "bitsadmin.exe",
++})
++_INTERPRETERS = frozenset({
++    "python", "python3", "python.exe", "pythonw.exe", "py", "py.exe", "node", "node.exe", "deno", "bun", "perl", "ruby", "php", "lua", "java", "java.exe",
++})
++_INLINE_FLAGS = frozenset({"-c", "-e", "-m=", "--eval", "-p", "--print", "-r", "-command", "-encodedcommand", "-enc", "-ec", "/c", "/k", "-exec", "--exec", "-x"})
++
++
++def _bases():
++    try:
++        return [Path(os.path.realpath(str(base))) for base in file_safety._hermes_dirs()]
++    except Exception:
++        home = os.environ.get("HERMES_HOME")
++        return [Path(os.path.realpath(home))] if home else []
++
++
++def _protected_roots():
++    roots = []
++    for base in _bases():
++        roots.extend(base / name for name in _CONTROL_NAMES + file_safety._HERMES_PROTECTED_SUBPATHS)
++    return roots
++
++
++def _under(path: Path, root: Path) -> bool:
++    try:
++        path.relative_to(root)
++        return True
++    except ValueError:
++        return False
++
++
++def write_error(path, verb: str = "Write", *, contents: bool = False) -> Optional[str]:
++    """The reason a write/delete/create at ``path`` must be refused, or None. ``contents=True`` (delete, move): also refuse a path that CONTAINS protected state."""
++    text = str(path)
++    error = file_safety.get_write_denied_error(text, verb=verb, entry=True)
++    if error:
++        return error
++    try:
++        resolved = Path(os.path.realpath(os.path.expanduser(text)))
++    except (OSError, ValueError):
++        return f"{verb} denied: '{text}' could not be resolved."
++    for root in _protected_roots():
++        if _under(resolved, root) or (contents and _under(root, resolved)):
++            return f"{verb} denied: '{text}' is Hermes code, configuration or credential state."
++    return None
++
++
++def read_error(path) -> Optional[str]:
++    return file_safety.get_read_block_error(str(path))
++
++
++def check_write(path, verb: str = "Write", *, contents: bool = False) -> None:
++    error = write_error(path, verb, contents=contents)
++    if error:
++        raise HTTPException(status_code=403, detail=error)
++
++
++def read_blocked(path) -> bool:
++    try:
++        return read_error(path) is not None
++    except Exception:
++        return True      # cannot decide -> blocked
++
++
++def check_repo(path, verb: str = "Git operation in") -> None:
++    """A mutating Git operation runs inside ``path``: it must be a place the agent guard would let a write land."""
++    check_write(path, verb)
++
++
++def mcp_command_error(command, args=None) -> Optional[str]:
++    """Why a stdio MCP server command is refused, or None. A shell, a script host, or an interpreter given inline code is arbitrary execution with no review."""
++    if not command:
++        return None
++    name = Path(str(command).strip().strip('"')).name.lower()
++    if name in _SHELLS:
++        return f"MCP command '{name}' is a shell or script host; install the server's own executable instead."
++    if name in _INTERPRETERS:
++        for arg in args or ():
++            lowered = str(arg).strip().lower()
++            if lowered in _INLINE_FLAGS or re.match(r"^-[a-z]*[ce]$", lowered):
++                return f"MCP command '{name} {arg}' runs inline code; point it at a script or module instead."
++    if re.search(r"[;&|`]|\$\(", str(command)):
++        return "MCP command contains shell operators."
++    return None
+diff --git a/hermes_cli/web_routers/files.py b/hermes_cli/web_routers/files.py
+index 9f2e5e3b9b..c47e881980 100644
+--- a/hermes_cli/web_routers/files.py
++++ b/hermes_cli/web_routers/files.py
+@@ -38,6 +38,7 @@ from hermes_cli.web_deps import late
+ from hermes_cli.web_server_remote_media import remote_media_response
+ from hermes_cli.web_upload_limit import CHAT_IMAGE_MAX_BYTES
+ from hermes_cli.web_server_surface import route_on
++from hermes_cli import web_route_guard as _route_guard
+ from hermes_cli.web_server_files import (
+     SANDBOX_NOT_FOUND, _agent_fs_path, _agent_path_scope, _file_url_path, _fs_path, _hosted_fs_read_guard,
+     _is_unmapped_container_path, _managed_file_entry, _managed_response_meta, _resolve_managed_path,
+@@ -970,6 +971,7 @@ def delete_managed_file(payload: ManagedFileDelete, request: Request):
+         raise HTTPException(status_code=400, detail="Cannot delete the managed files root")
+     if target.parent == target:
+         raise HTTPException(status_code=400, detail="Cannot delete the filesystem root")
++    _route_guard.check_write(target, "Delete", contents=True)
+     if not target.exists():
+         raise HTTPException(status_code=404, detail="Path not found")
+ 
+@@ -1017,7 +1019,7 @@ async def fs_list(path: str, request: Request, profile: Optional[str] = None):
+             return await asyncio.to_thread(backend.list_dir, path, _FS_READDIR_HIDDEN)
+         except Exception as exc:
+             _raise_fs_backend_error(exc)
+-    target = _agent_fs_path(path, profile_home=_fs_profile_home(profile))
++    target = _guard_fs(_agent_fs_path(path, profile_home=_fs_profile_home(profile)), False)
+     _hosted_fs_read_guard(target, request)
+     try:
+         # The scan stats every entry (a network share answers in seconds): off the event loop.
+@@ -1142,6 +1144,14 @@ async def fs_write_text(payload: FsWriteText, profile: Optional[str] = None):
+     return {"ok": True, "path": str(target), "byteSize": len(text.encode("utf-8"))}
+ 
+ 
++def _guard_fs(target: Path, write: bool) -> Path:
++    if write:
++        _route_guard.check_write(target)
++    elif _route_guard.read_blocked(target):
++        raise HTTPException(status_code=403, detail="Read denied: this path is protected Hermes state or a credential file.")
++    return target
++
++
+ async def _fs_download_path(
+     path: str, profile: Optional[str], session_id: Optional[str], *, session: Optional[dict] = None,
+     decode_fallback: bool = True, own_sandbox_only: bool = False,
+@@ -1161,11 +1171,11 @@ async def _fs_download_path(
+         # The profile's scope qualifies the key its turns registered the session's workspace under.
+         with _agent_path_scope(profile_home):
+             workspace_key, workspace_cwd = _session_workspace(session_id, cwd)
+-        return _agent_fs_path(
++        return _guard_fs(_agent_fs_path(
+             path, cwd=cwd, profile_home=profile_home, workspace_key=workspace_key,
+             workspace_cwd=workspace_cwd, decode_fallback=decode_fallback, own_sandbox_only=own_sandbox_only,
+-        )
+-    return _agent_fs_path(path, profile_home=profile_home, decode_fallback=decode_fallback)
++        ), own_sandbox_only)
++    return _guard_fs(_agent_fs_path(path, profile_home=profile_home, decode_fallback=decode_fallback), own_sandbox_only)
+ 
+ 
+ async def _fs_owned_session(session_id: Optional[str], profile: Optional[str]) -> Optional[dict]:
+diff --git a/hermes_cli/web_routers/git.py b/hermes_cli/web_routers/git.py
+index 560eab3419..76e8338fea 100644
+--- a/hermes_cli/web_routers/git.py
++++ b/hermes_cli/web_routers/git.py
+@@ -7,6 +7,7 @@ wrappers (git/gh can block).
+ """
+ 
+ import asyncio
++import os
+ import shutil
+ import time
+ from functools import partial
+@@ -16,6 +17,7 @@ from typing import Optional
+ from fastapi import APIRouter, HTTPException, Request
+ 
+ from hermes_cli import web_git as _web_git
++from hermes_cli import web_route_guard as _route_guard
+ from hermes_cli._subprocess_compat import bounded_probe_run
+ from hermes_cli.web_deps import late
+ from hermes_cli.web_server_files import _fs_path, _hosted_fs_path_allowed, _hosted_fs_read_guard
+@@ -44,7 +46,24 @@ async def _git_op(fn, *args):
+ 
+ 
+ def _git_path(path: str) -> str:
+-    return str(_fs_path(path))
++    resolved = _fs_path(path)
++    if _route_guard.read_blocked(resolved):
++        raise HTTPException(status_code=403, detail="Read denied: this path is protected Hermes state or a credential file.")
++    return str(resolved)
++
++
++def _git_write_path(path: str, *, publish: bool = False, file: str | None = None) -> str:
++    """A path a Git MUTATION may run in: the same verdict the agent's write tools get. Publishing needs an explicit opt-in."""
++    resolved = _git_path(path)
++    _route_guard.check_repo(resolved)
++    if file:
++        _route_guard.check_write(Path(resolved) / file, "Git change to")
++    if publish and os.environ.get("HERMES_WEBAPP_ALLOW_GIT_PUBLISH") != "1":
++        raise HTTPException(
++            status_code=403,
++            detail="Publishing (push / pull request) from the web interface is disabled. Set HERMES_WEBAPP_ALLOW_GIT_PUBLISH=1 to allow it.",
++        )
++    return resolved
+ 
+ 
+ @router.get("/api/git/status")
+@@ -171,32 +190,32 @@ async def git_pr_list_route(body: GitPrListBody):
+ 
+ @router.post("/api/git/review/stage")
+ async def git_stage_route(body: GitFileBody):
+-    return await _git_op(_web_git.review_stage, _git_path(body.path), body.file)
++    return await _git_op(_web_git.review_stage, _git_write_path(body.path, file=body.file), body.file)
+ 
+ 
+ @router.post("/api/git/review/unstage")
+ async def git_unstage_route(body: GitFileBody):
+-    return await _git_op(_web_git.review_unstage, _git_path(body.path), body.file)
++    return await _git_op(_web_git.review_unstage, _git_write_path(body.path, file=body.file), body.file)
+ 
+ 
+ @router.post("/api/git/review/revert")
+ async def git_revert_route(body: GitFileBody):
+-    return await _git_op(_web_git.review_revert, _git_path(body.path), body.file)
++    return await _git_op(_web_git.review_revert, _git_write_path(body.path, file=body.file), body.file)
+ 
+ 
+ @router.post("/api/git/review/commit")
+ async def git_commit_route(body: GitCommitBody):
+-    return await _git_op(_web_git.review_commit, _git_path(body.path), body.message, body.push)
++    return await _git_op(_web_git.review_commit, _git_write_path(body.path, publish=bool(body.push)), body.message, body.push)
+ 
+ 
+ @router.post("/api/git/review/push")
+ async def git_push_route(body: GitPathBody):
+-    return await _git_op(_web_git.review_push, _git_path(body.path))
++    return await _git_op(_web_git.review_push, _git_write_path(body.path, publish=True))
+ 
+ 
+ @router.post("/api/git/review/create-pr")
+ async def git_create_pr_route(body: GitPathBody):
+-    return await _git_op(_web_git.review_create_pr, _git_path(body.path))
++    return await _git_op(_web_git.review_create_pr, _git_write_path(body.path, publish=True))
+ 
+ 
+ @router.post("/api/git/worktree/add")
+@@ -206,16 +225,16 @@ async def git_worktree_add_route(body: GitWorktreeAddBody):
+         for key, value in body.model_dump(include={"name", "branch", "base", "existingBranch"}).items()
+         if value
+     }
+-    return await _git_op(_web_git.worktree_add, _git_path(body.path), options)
++    return await _git_op(_web_git.worktree_add, _git_write_path(body.path), options)
+ 
+ 
+ @router.post("/api/git/worktree/remove")
+ async def git_worktree_remove_route(body: GitWorktreeRemoveBody):
+     return await _git_op(
+-        _web_git.worktree_remove, _git_path(body.path), _git_path(body.worktreePath), body.force
++        _web_git.worktree_remove, _git_write_path(body.path), _git_write_path(body.worktreePath), body.force
+     )
+ 
+ 
+ @router.post("/api/git/branch/switch")
+ async def git_branch_switch_route(body: GitBranchSwitchBody):
+-    return await _git_op(_web_git.branch_switch, _git_path(body.path), body.branch)
++    return await _git_op(_web_git.branch_switch, _git_write_path(body.path), body.branch)
+diff --git a/hermes_cli/web_routers/mcp.py b/hermes_cli/web_routers/mcp.py
+index fefae2dc77..4c6578efc1 100644
+--- a/hermes_cli/web_routers/mcp.py
++++ b/hermes_cli/web_routers/mcp.py
+@@ -107,6 +107,15 @@ async def list_mcp_servers(profile: Optional[str] = None):
+     ]}
+ 
+ 
++def _check_mcp_command(server_config) -> None:
++    from hermes_cli import web_route_guard
++
++    if isinstance(server_config, dict):
++        error = web_route_guard.mcp_command_error(server_config.get("command"), server_config.get("args"))
++        if error:
++            raise HTTPException(status_code=400, detail=error)
++
++
+ @router.post("/api/mcp/servers")
+ async def add_mcp_server(body: MCPServerCreate, profile: Optional[str] = None):
+     from hermes_cli.mcp_catalog import record_mcp_install
+@@ -116,6 +125,7 @@ async def add_mcp_server(body: MCPServerCreate, profile: Optional[str] = None):
+         name, server_config, bearer_token = _normalize_mcp_server_create(body)
+     except ValueError as exc:
+         raise HTTPException(status_code=400, detail=str(exc)) from exc
++    _check_mcp_command(server_config)
+ 
+     def _save() -> bool:
+         # _save_mcp_server does its own load→mutate→save; the duplicate-name
+@@ -164,6 +174,9 @@ async def replace_mcp_servers(body: MCPServersReplace, profile: Optional[str] =
+     ``enabled: false``, so removals wouldn't persist through it."""
+     from hermes_cli.mcp_config import _replace_mcp_servers
+ 
++    for _config in body.servers.values():
++        _check_mcp_command(_config)
++
+     def _run():
+         with config_write_scope(body.profile or profile):
+             from tui_gateway.mcp_rpc_helpers import server_configs_with_sources
+diff --git a/hermes_cli/web_server_files.py b/hermes_cli/web_server_files.py
+index d61bd65e2b..f4b8cf7085 100644
+--- a/hermes_cli/web_server_files.py
++++ b/hermes_cli/web_server_files.py
+@@ -470,6 +470,12 @@ def _resolve_managed_path(
+     if root is not None and not _path_is_under(root, resolved):
+         raise HTTPException(status_code=403, detail="Path outside managed files root")
+ 
++    from hermes_cli import web_route_guard
++    if for_write:
++        web_route_guard.check_write(resolved)
++    elif web_route_guard.read_blocked(resolved):
++        raise HTTPException(status_code=403, detail="Read denied: this path is protected Hermes state or a credential file.")
++
+     return policy, resolved, str(resolved)
+ 
+ 
+diff --git a/tests/hermes_cli/test_web_route_guard.py b/tests/hermes_cli/test_web_route_guard.py
+new file mode 100644
+index 0000000000..8d3817aab7
+--- /dev/null
++++ b/tests/hermes_cli/test_web_route_guard.py
+@@ -0,0 +1,111 @@
++"""The direct file/Git/MCP routes apply the same verdicts as the agent's file tools (Odysseus reviewed patch)."""
++import subprocess
++
++import pytest
++from fastapi import FastAPI
++from fastapi.testclient import TestClient
++
++
++@pytest.fixture()
++def env(tmp_path, monkeypatch):
++    home = tmp_path / "hermes-home"
++    work = tmp_path / "work"
++    for d in (home / "plugins", home / "webapp", home / "hooks", work):
++        d.mkdir(parents=True)
++    (home / "config.yaml").write_text("approvals: {mode: smart}\n")
++    (home / ".env").write_text("SECRET=1\n")
++    (home / "webapp" / "credential.json").write_text('{"token":"x"}')
++    (home / "plugins" / "p.py").write_text("print(1)\n")
++    (work / "a.txt").write_text("a\n")
++    monkeypatch.setenv("HERMES_HOME", str(home))
++    monkeypatch.setenv("HERMES_WRITE_SAFE_ROOT", str(work))
++    monkeypatch.delenv("HERMES_WEBAPP_ALLOW_GIT_PUBLISH", raising=False)
++    from hermes_cli.web_routers import files, git, mcp
++    app = FastAPI()
++    for module in (files, git, mcp):
++        app.include_router(module.router)
++    subprocess.run(["git", "init", "-q", str(work)], check=True)
++    return TestClient(app), home, work
++
++
++@pytest.mark.parametrize("rel", ["plugins/evil.py", "plugins/p.py", "hooks/h.py", "config.yaml", "webapp/credential.json", ".env"])
++def test_write_text_refused_in_hermes_state(env, rel):
++    client, home, _ = env
++    r = client.post("/api/fs/write-text", json={"path": str(home / rel), "content": "x"})
++    assert r.status_code == 403, r.text
++    if (home / rel).exists():
++        assert (home / rel).read_text() != "x"
++
++
++def test_write_text_outside_safe_root_refused_and_inside_allowed(env, tmp_path):
++    client, _, work = env
++    outside = tmp_path / "outside.txt"
++    assert client.post("/api/fs/write-text", json={"path": str(outside), "content": "x"}).status_code == 403
++    assert not outside.exists()
++    ok = client.post("/api/fs/write-text", json={"path": str(work / "a.txt"), "content": "changed\n"})
++    assert ok.status_code == 200 and (work / "a.txt").read_text() == "changed\n"
++
++
++def test_credential_reads_refused(env):
++    client, home, _ = env
++    for rel in ("webapp/credential.json", ".env"):
++        assert client.get("/api/fs/read-text", params={"path": str(home / rel)}).status_code == 403
++    assert client.get("/api/fs/list", params={"path": str(home / "webapp")}).status_code == 403
++    assert client.get("/api/fs/read-text", params={"path": str(env[2] / "a.txt")}).status_code == 200
++
++
++def test_delete_refuses_protected_and_containing_paths(env):
++    client, home, work = env
++    assert client.request("DELETE", "/api/files", json={"path": str(home / "plugins" / "p.py")}).status_code == 403
++    assert client.request("DELETE", "/api/files", json={"path": str(home), "recursive": True}).status_code == 403
++    assert (home / "plugins" / "p.py").exists()
++    assert client.request("DELETE", "/api/files", json={"path": str(work / "a.txt")}).status_code == 200
++
++
++def test_mkdir_and_upload_refused_in_protected_dirs(env):
++    client, home, _ = env
++    assert client.post("/api/files/mkdir", json={"path": str(home / "plugins" / "sub")}).status_code == 403
++    assert not (home / "plugins" / "sub").exists()
++
++
++def test_git_mutations_follow_the_write_verdict(env, tmp_path):
++    client, home, work = env
++    assert client.post("/api/git/review/stage", json={"path": str(work), "file": "a.txt"}).status_code != 403
++    other = tmp_path / "other"
++    other.mkdir()
++    subprocess.run(["git", "init", "-q", str(other)], check=True)
++    assert client.post("/api/git/review/stage", json={"path": str(other), "file": "x"}).status_code == 403
++    assert client.post("/api/git/review/commit", json={"path": str(home), "message": "m"}).status_code == 403
++    assert client.get("/api/git/status", params={"path": str(home / "webapp")}).status_code == 403
++
++
++def test_git_publish_needs_opt_in(env, monkeypatch):
++    client, _, work = env
++    for route in ("push", "create-pr"):
++        r = client.post(f"/api/git/review/{route}", json={"path": str(work)})
++        assert r.status_code == 403 and "HERMES_WEBAPP_ALLOW_GIT_PUBLISH" in r.text
++    assert client.post("/api/git/review/commit", json={"path": str(work), "message": "m", "push": True}).status_code == 403
++    monkeypatch.setenv("HERMES_WEBAPP_ALLOW_GIT_PUBLISH", "1")
++    r = client.post("/api/git/review/push", json={"path": str(work)})
++    assert "HERMES_WEBAPP_ALLOW_GIT_PUBLISH" not in r.text       # no remote here, so Git itself fails; the guard no longer is the reason
++
++
++@pytest.mark.parametrize("command,args", [
++    ("cmd.exe", ["/c", "calc"]), ("powershell", ["-Command", "x"]), ("C:\\Windows\\System32\\bash.exe", []),
++    ("python", ["-c", "import os"]), ("node", ["-e", "1"]), ("sh", ["-c", "x"]),
++])
++def test_mcp_arbitrary_execution_refused(env, command, args):
++    client, _, _ = env
++    r = client.post("/api/mcp/servers", json={"name": "evil", "command": command, "args": args})
++    assert r.status_code == 400, r.text
++    r = client.put("/api/mcp/servers", json={"servers": {"evil": {"command": command, "args": args}}})
++    assert r.status_code == 400, r.text
++
++
++def test_mcp_ordinary_servers_not_blocked_by_the_guard():
++    from hermes_cli.web_route_guard import mcp_command_error
++    assert mcp_command_error("npx", ["-y", "@modelcontextprotocol/server-filesystem", "."]) is None
++    assert mcp_command_error("uvx", ["mcp-server-git"]) is None
++    assert mcp_command_error("python", ["-m", "my_server"]) is None
++    assert mcp_command_error("python", ["server.py"]) is None
++    assert mcp_command_error(None, None) is None
