@@ -1,0 +1,9 @@
+name: odysseus-ask-policy
+version: 0.1.0
+manifest_version: 2
+kind: standalone
+description: "Odysseus ask-policy: every tool call except a small read-only list is put to the human approval gate (not the smart judge), and the never-allow list is enforced at the agent's single file-write classifier. Asking is not sandboxing."
+author: Odysseus
+license: MIT
+provides_hooks:
+  - pre_tool_call
