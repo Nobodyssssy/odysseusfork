@@ -85,5 +85,21 @@ GET http://127.0.0.1:8787/api/sessions -H "Host: hermes.localhost:7000" -> 401  
 ```
 [code] src/hermes_proxy.py:35-40 builds one long-lived `httpx.AsyncClient` shared by all requests, with no cookie-jar restriction.
 httpx stores Set-Cookie from responses in the client jar and replays it on later requests that carry no Cookie header of their own.
-Most likely cause (behaviour confirmed, mechanism not yet instrumented): once any browser logs in through the proxy, Hermes's session cookie sits in the proxy's jar and every later proxied request - from any local process - is authenticated as that session.
+CONFIRMED cause (code: httpx 0.28.1 `_client.py:1737` `self.cookies.extract_cookies(response)` on every response; `_merge_cookies` re-adds the jar when the request has no Cookie header; reproduced in isolation by `test_the_proxy_never_remembers_or_replays_cookies`, which failed before the fix with `'a=1; b=2' is not None`): once any browser logs in through the proxy, Hermes's session cookie sits in the proxy's jar and every later proxied request - from any local process - is authenticated as that session.
 The proxy also adds no Odysseus-login requirement (known from Phase 0), so hermes.localhost:7000 currently needs no credentials at all once someone has logged in once.
+
+## 6. TASK 1 - proxy cookie-jar fix (src/hermes_proxy.py)
+Change: `_StatelessClient(httpx.AsyncClient)` overrides the public `cookies` property to return an always-empty `_NoCookies` jar
+(`extract_cookies`, `set_cookie_header`, `set` are no-ops). One shared client is kept (keepalive and SSE streaming unchanged); no per-response
+`clear()`; the caller's own `Cookie` header is forwarded untouched and upstream `Set-Cookie` is still returned to the browser. Module docstring corrected.
+[sim, real uvicorn + fake Hermes] `tests/application_modes/test_proxy.py`: new test RED before the fix, then 12 passed, including
+`test_headers_cookies_query_and_origin_pass_through_unchanged`, `test_sse_is_streamed_not_buffered`, `test_large_uploads_content_length_and_chunked`.
+[live, throwaway proxy process on a random port in front of the REAL Hermes 8787; Odysseus on 7000 untouched]:
+```
+proxied GET /api/sessions, no cookie (x3): 401, 401, 401
+proxied GET /api/auth/status, no cookie:   200 {"auth_enabled": true, "logged_in": false, ...}
+proxied GET /health: 200 ; GET /: 302 ; GET /login: 200
+```
+NOT YET TRUE ON THE LIVE 7000 PROXY: that process still runs the old code (and a possibly poisoned jar) until Odysseus is restarted.
+NOT TESTED: browser login through the proxy and reload persistence (needs the password, which I must not use); that behaviour is covered only by the
+fake-Hermes test that a client-supplied Cookie header is forwarded unchanged.

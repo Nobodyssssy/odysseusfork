@@ -1,9 +1,12 @@
 """Host-routed loopback proxy: hermes.localhost:<port> -> the independent Hermes backend.
 
 Requests whose Host is exactly hermes.localhost:<listener port> are forwarded to
-Hermes untouched (Host, Origin, cookies and bodies preserved, so Hermes keeps its
-own origin, CSRF and CSP). Every other request reaches Odysseus unchanged. This
-is not a security boundary beyond the checks below; Hermes keeps its own auth.
+Hermes with Host, Origin, bodies and the caller's own Cookie header unchanged, so
+Hermes keeps its own origin, CSRF and CSP; Hermes' Set-Cookie goes back to the
+browser. The proxy itself keeps no cookies: its shared HTTP client would otherwise
+store a Hermes login and attach it to later requests from any local process.
+Every other request reaches Odysseus unchanged. This is not a security boundary
+beyond the checks below; Hermes keeps its own auth.
 """
 import asyncio
 import socket
@@ -23,6 +26,29 @@ _ERROR_HEADERS = [(b'content-type', b'text/plain; charset=utf-8'), (b'cache-cont
                   (b'content-security-policy', b"default-src 'none'; frame-ancestors 'none'")]
 
 
+class _NoCookies(httpx.Cookies):
+    """An always-empty jar: nothing is stored from responses and nothing is added to requests."""
+
+    def extract_cookies(self, response):
+        return None
+
+    def set_cookie_header(self, request):
+        return None
+
+    def set(self, *args, **kwargs):
+        return None
+
+
+class _StatelessClient(httpx.AsyncClient):
+    @property
+    def cookies(self):
+        return _NoCookies()
+
+    @cookies.setter
+    def cookies(self, cookies):
+        return None
+
+
 class HermesHostProxy:
     def __init__(self, app, upstream):
         parts = urlsplit(upstream)
@@ -34,7 +60,7 @@ class HermesHostProxy:
 
     def _http(self):
         if self._client is None:
-            self._client = httpx.AsyncClient(
+            self._client = _StatelessClient(
                 base_url=self.upstream, follow_redirects=False, trust_env=False,
                 timeout=httpx.Timeout(connect=5, read=None, write=120, pool=10),
                 limits=httpx.Limits(max_connections=64, max_keepalive_connections=8))

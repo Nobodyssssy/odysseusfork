@@ -150,6 +150,19 @@ class ProxyTests(unittest.TestCase):
         self.assertEqual([v for k, v in response.getheaders() if k.lower() == 'set-cookie'], ['a=1; Path=/; HttpOnly', 'b=2; Path=/'])
         connection.close()
 
+    def test_the_proxy_never_remembers_or_replays_cookies(self):
+        origin = f'http://hermes.localhost:{self.port}'
+        first = self.call(path='/echo', headers={'Origin': origin})
+        self.assertEqual(len([k for k, _ in first[1].getheaders() if k.lower() == 'set-cookie']), 2)
+        first[1].read(); first[0].close()
+        for _ in range(3):
+            connection, response = self.call(path='/echo', headers={'Origin': origin})
+            self.assertIsNone(json.loads(response.read())['cookie'], 'a cookie Hermes set for one client reached a later client')
+            connection.close()
+        connection, response = self.call(path='/echo', headers={'Cookie': 'mine=1'})
+        self.assertEqual(json.loads(response.read())['cookie'], 'mine=1')
+        connection.close()
+
     def test_redirect_to_the_internal_address_is_rewritten_to_the_public_host(self):
         connection, response = self.call(path='/redirect')
         self.assertEqual(response.status, 302)
