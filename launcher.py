@@ -146,4 +146,5 @@ if __name__ == "__main__":
         # Start system tray manager thread
         threading.Thread(target=setup_system_tray, args=(url,), daemon=True).start()
 
-    uvicorn.run(app, host=bind_host, port=bind_port, log_level="info")
+    from src.hermes_proxy import uvicorn_ws_max_size
+    uvicorn.run(app, host=bind_host, port=bind_port, log_level="info", ws_max_size=uvicorn_ws_max_size())

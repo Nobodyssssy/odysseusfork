@@ -1517,12 +1517,14 @@ if __name__ == "__main__":
     # stream cannot stall a restart for the whole window. The long window stays
     # a safety net for genuine in-flight image ops.
     from src import shutdown as _shutdown
+    from src.hermes_proxy import uvicorn_ws_max_size
 
     config = uvicorn.Config(
         app,
         host=bind_host,
         port=bind_port,
         log_level="info",
+        ws_max_size=uvicorn_ws_max_size(),
         timeout_graceful_shutdown=int(os.getenv("ODYSSEUS_GRACEFUL_SHUTDOWN_TIMEOUT", "900") or 900),
     )
     server = uvicorn.Server(config)
