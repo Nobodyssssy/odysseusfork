@@ -103,3 +103,42 @@ proxied GET /health: 200 ; GET /: 302 ; GET /login: 200
 NOT YET TRUE ON THE LIVE 7000 PROXY: that process still runs the old code (and a possibly poisoned jar) until Odysseus is restarted.
 NOT TESTED: browser login through the proxy and reload persistence (needs the password, which I must not use); that behaviour is covered only by the
 fake-Hermes test that a client-supplied Cookie header is forwarded unchanged.
+
+## 7. Live confirmation of Task 1 after your restart (15:08 Odysseus pid 16660, 15:09 Hermes pid 19216, Chroma 15:08)
+[live] cookie-less `GET http://hermes.localhost:7000/api/sessions` -> 401 (was 200 before the restart); `127.0.0.1:8787/api/sessions` -> 401;
+`/api/auth/status` and `/health` -> 200 on both (public by design); with `Origin: http://evil.example` through the proxy -> 401.
+
+## 8. TASK 2 - state-changing POSTs, no cookie, MALFORMED payloads only [live]
+Through the proxy (`http://hermes.localhost:7000`), 4 shapes each (no headers + `{}`; Origin/Sec-Fetch-Site same-origin + `{}`; same-origin + `{not json`; no headers + empty body):
+
+| endpoint | no hdrs | same-origin | malformed | empty |
+|---|---|---|---|---|
+| /api/trusted-workspaces/approve | 401 | 401 | 401 | 401 |
+| /api/trusted-workspaces/revoke | 401 | 401 | 401 | 401 |
+| /api/trusted-workspaces/block | 401 | 401 | 401 | 401 |
+| /api/trusted-workspaces/unblock | 401 | 401 | 401 | 401 |
+| /api/trusted-workspaces/decide | 401 | 401 | 401 | 401 |
+| /api/terminal/start | 401 | 401 | 401 | 401 |
+| /api/commands/exec | 401 | 401 | 401 | 401 |
+| /api/chat/start | 401 | 401 | 401 | 401 |
+| /api/approval/respond | 401 | 401 | 401 | 401 |
+
+FAIL list (any 400/422/other = reached a handler): **none**. Direct 8787 control (approve, revoke, block, terminal/start x4 shapes): all 401.
+Rebinding shape (`Host`+`Origin` = evil.test, `Sec-Fetch-Site: same-origin`): direct 8787 approve/terminal/chat -> 401; sent to the proxy port with an evil Host (not routed to Hermes) approve/terminal -> 401.
+No valid approval and no real command was sent.
+
+CSRF token for an unauthenticated client [live]: `GET /` -> 302 (empty body), `/login` 200 (2684 B), `/api/auth/status` 200, `/health` 200, `/api/auth/csrf` 401, `/api/csrf` 401.
+No CSRF-like token in any body, no `Set-Cookie` or csrf header on `/login`. [code] `csrf_token_for_session()` (auth.py:1107) is derived from an authenticated session cookie and
+is embedded only in the authenticated shell page (routes.py:17469-17494). Unauthenticated clients cannot obtain one.
+
+## 9. Invariant (recorded, tested)
+The origin guard fails OPEN for header-less clients BY DESIGN (curl/MCP/CLI send no Origin/Referer/Sec-Fetch-Site; section 2 matrix). Therefore auth must ALWAYS be on.
+Test `integrations/hermes-mode/patches/test_webui_auth_invariant.py` (copy to `tests/`, run with the WebUI's interpreter; stdlib unittest) [sim, real pinned code]:
+```
+PasswordOn.test_the_route_list_is_not_empty_and_covers_the_dangerous_endpoints ... ok
+PasswordOn.test_every_state_changing_route_refuses_a_credential_less_request ... ok   (every /api/ literal in handle_post/put/patch/delete x 5 header shapes)
+PasswordOn.test_the_origin_guard_fails_open_for_headerless_clients_so_auth_must_stay_on ... ok
+PasswordOff.test_without_a_password_the_same_request_is_not_refused... ok              (negative control)
+Ran 4 tests in 3.868s  OK
+```
+The route list is parsed from `api/routes.py` with `ast`, so a newly added state-changing route is covered automatically. Nothing was changed to break CLI/MCP.
