@@ -29,13 +29,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from src.hermes_component import (ComponentError, SourcePin, atomic_bytes, atomic_json, checkout_source, component_lock,
+from src.hermes_component import (ComponentError, SourcePin, atomic_bytes, atomic_json, checkout_source, component_lock, patch_state,
                                   private_directory, probe_python, run_install, safe_directory, verify_checkout)
 
 ORIGINS = ('managed', 'adopted')
 PLUGIN_NAME = 'odysseus-return'
 BUILD_SCRIPT = 'apps/desktop/scripts/build-webapp.mjs'
 BUNDLE_RELATIVE = 'apps/desktop/dist-webapp'
+ROUTE_GUARD_PATCH = 'integrations/hermes-mode/patches/webapp-route-guard.patch'
 _NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
 _RELEASE = re.compile(r'[0-9a-f]{12}')
 _SECRET_NAME = re.compile(r'KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL', re.I)
@@ -447,7 +448,7 @@ class WebappComponent:
         log = release_dir / 'install.log'
         env = {**self.environment, 'GIT_TERMINAL_PROMPT': '0'}
         source = release_dir / 'src'
-        checkout_source(source, pin, log, env)
+        checkout_source(source, pin, log, env, self.route_guard_patch())
         bundle, verdict, tool_versions = self._build(source, release_dir, log)
         if python:
             probe_python(python, require_agent=True)
@@ -526,7 +527,9 @@ class WebappComponent:
         try:
             agent = safe_directory(config['agent'])
             with read_only_git():
-                verify_checkout(agent, pin)
+                verify_checkout(agent, pin, self.route_guard_patch() if config.get('origin') == 'managed' else None)
+            if config.get('origin') == 'managed' and self.route_guard_state(config) != 'applied':
+                raise ComponentError('The managed gateway source lacks the reviewed route guard; it will not be started.')
             probe_python(config['python'], require_agent=True)
             for key in ('home',):
                 path = safe_directory(config[key])
@@ -549,6 +552,7 @@ class WebappComponent:
             return {'enabled': False, 'state': 'not_installed'}
         result = {'enabled': config['enabled'], 'origin': config['origin'], 'url': config['url'], 'release': config.get('release'),
                   'previous': config.get('previous'), 'revision': (config.get('revisions') or {}).get('webapp')}
+        result['route_guard'] = self.route_guard_state(config)
         if not config['enabled']:
             return {**result, 'state': 'disabled'}
         port = loopback_port(config['url'])
@@ -637,10 +641,27 @@ class WebappComponent:
             raise ComponentError('This gateway is user-owned (adopted); Odysseus never starts, stops or restarts it.')
         return config
 
+    def route_guard_patch(self):
+        path = (self.application_root / ROUTE_GUARD_PATCH).resolve()
+        if not path.is_file():
+            raise ComponentError('The reviewed route-guard patch is missing from this Odysseus installation.')
+        return path
+
+    def route_guard_state(self, config):
+        """'applied' for a managed source carrying exactly the reviewed patch, else 'absent' (adopted gateways run the user's unpatched code)."""
+        if config.get('origin') != 'managed':
+            return 'absent'
+        try:
+            return patch_state(safe_directory(config['agent']), self.route_guard_patch())
+        except (ComponentError, OSError, KeyError):
+            return 'unknown'
+
     def gateway_environment(self, config):
         env = {key: self.environment[key] for key in _GATEWAY_ENV if key in self.environment}
         if 'HERMES_WRITE_SAFE_ROOT' in self.environment:      # the operator's own write policy, passed through unchanged, never invented
             env['HERMES_WRITE_SAFE_ROOT'] = self.environment['HERMES_WRITE_SAFE_ROOT']
+        if 'HERMES_WEBAPP_ALLOW_GIT_PUBLISH' in self.environment:       # the operator's explicit opt-in for push / pull request, never invented
+            env['HERMES_WEBAPP_ALLOW_GIT_PUBLISH'] = self.environment['HERMES_WEBAPP_ALLOW_GIT_PUBLISH']
         env.update({'HERMES_HOME': config['home'], 'PYTHONPATH': config['agent'], 'HERMES_WEBAPP_DIST': config['bundle'],
                     'PYTHONUTF8': '1', 'PYTHONDONTWRITEBYTECODE': '1'})
         return env

@@ -1,9 +1,9 @@
 diff --git a/hermes_cli/web_route_guard.py b/hermes_cli/web_route_guard.py
 new file mode 100644
-index 0000000000..55441f9a68
+index 0000000000..c71cbbbfae
 --- /dev/null
 +++ b/hermes_cli/web_route_guard.py
-@@ -0,0 +1,109 @@
+@@ -0,0 +1,149 @@
 +"""Route guard for the Webapp's direct file, Git and MCP routes (Odysseus reviewed patch).
 +
 +The agent's file tools consult ``agent.file_safety`` (protected Hermes state, credentials, ``HERMES_WRITE_SAFE_ROOT``). The Webapp's direct REST routes
@@ -13,6 +13,7 @@ index 0000000000..55441f9a68
 +
 +Not a sandbox: it does not stop a process that can already run commands as this user. Raise the cost of the web/token vector and keep parity with the agent guard.
 +"""
++import json
 +import os
 +import re
 +from pathlib import Path
@@ -52,6 +53,28 @@ index 0000000000..55441f9a68
 +    return roots
 +
 +
++def _user_blocked_roots():
++    """Folders the user listed as off limits in ``<home>/vault/webui-trusted-workspaces.json`` (``blocked``). Unreadable list -> None (caller fails closed)."""
++    roots = []
++    for base in _bases():
++        listing = base / "vault" / "webui-trusted-workspaces.json"
++        if not listing.is_file():
++            continue
++        try:
++            entries = json.loads(listing.read_text(encoding="utf-8")).get("blocked") or []
++            roots.extend(Path(os.path.realpath(str(entry["path"]))) for entry in entries if isinstance(entry, dict) and entry.get("path"))
++        except (OSError, ValueError, AttributeError, TypeError):
++            return None
++    return roots
++
++
++def _user_blocked(path: Path, *, contents: bool = False) -> Optional[bool]:
++    roots = _user_blocked_roots()
++    if roots is None:
++        return None
++    return any(_under(path, root) or (contents and _under(root, path)) for root in roots)
++
++
 +def _under(path: Path, root: Path) -> bool:
 +    try:
 +        path.relative_to(root)
@@ -73,11 +96,26 @@ index 0000000000..55441f9a68
 +    for root in _protected_roots():
 +        if _under(resolved, root) or (contents and _under(root, resolved)):
 +            return f"{verb} denied: '{text}' is Hermes code, configuration or credential state."
++    blocked = _user_blocked(resolved, contents=contents)
++    if blocked is None:
++        return f"{verb} denied: the list of blocked folders could not be read."
++    if blocked:
++        return f"{verb} denied: '{text}' is in a folder you marked as blocked."
 +    return None
 +
 +
 +def read_error(path) -> Optional[str]:
-+    return file_safety.get_read_block_error(str(path))
++    error = file_safety.get_read_block_error(str(path))
++    if error:
++        return error
++    try:
++        resolved = Path(os.path.realpath(os.path.expanduser(str(path))))
++    except (OSError, ValueError):
++        return "Read denied: the path could not be resolved."
++    blocked = _user_blocked(resolved)
++    if blocked is None or blocked:
++        return "Read denied: this folder is blocked."
++    return None
 +
 +
 +def check_write(path, verb: str = "Write", *, contents: bool = False) -> None:
@@ -93,9 +131,11 @@ index 0000000000..55441f9a68
 +        return True      # cannot decide -> blocked
 +
 +
-+def check_repo(path, verb: str = "Git operation in") -> None:
++def check_repo(path) -> None:
 +    """A mutating Git operation runs inside ``path``: it must be a place the agent guard would let a write land."""
-+    check_write(path, verb)
++    error = write_error(path, "Git change")
++    if error:
++        raise HTTPException(status_code=403, detail=error.replace("Git change denied:", "Git changes are not allowed here:", 1))
 +
 +
 +def mcp_command_error(command, args=None) -> Optional[str]:
@@ -334,10 +374,10 @@ index d61bd65e2b..f4b8cf7085 100644
  
 diff --git a/tests/hermes_cli/test_web_route_guard.py b/tests/hermes_cli/test_web_route_guard.py
 new file mode 100644
-index 0000000000..8d3817aab7
+index 0000000000..7d0c8b7b1f
 --- /dev/null
 +++ b/tests/hermes_cli/test_web_route_guard.py
-@@ -0,0 +1,111 @@
+@@ -0,0 +1,128 @@
 +"""The direct file/Git/MCP routes apply the same verdicts as the agent's file tools (Odysseus reviewed patch)."""
 +import subprocess
 +
@@ -394,6 +434,22 @@ index 0000000000..8d3817aab7
 +    assert client.get("/api/fs/read-text", params={"path": str(env[2] / "a.txt")}).status_code == 200
 +
 +
++def test_user_blocked_folders_apply_to_reads_writes_and_delete(env):
++    import json
++    client, home, work = env
++    (work / "secrets").mkdir()
++    (work / "secrets" / "k.txt").write_text("k")
++    (home / "vault").mkdir()
++    listing = home / "vault" / "webui-trusted-workspaces.json"
++    listing.write_text(json.dumps({"blocked": [{"path": str(work / "secrets")}]}))
++    assert client.post("/api/fs/write-text", json={"path": str(work / "secrets" / "k.txt"), "content": "x"}).status_code == 403
++    assert client.get("/api/fs/read-text", params={"path": str(work / "secrets" / "k.txt")}).status_code == 403
++    assert client.request("DELETE", "/api/files", json={"path": str(work / "secrets"), "recursive": True}).status_code == 403
++    assert client.post("/api/fs/write-text", json={"path": str(work / "a.txt"), "content": "ok"}).status_code == 200
++    listing.write_text("{not json")
++    assert client.post("/api/fs/write-text", json={"path": str(work / "a.txt"), "content": "ok"}).status_code == 403   # unreadable list fails closed
++
++
 +def test_delete_refuses_protected_and_containing_paths(env):
 +    client, home, work = env
 +    assert client.request("DELETE", "/api/files", json={"path": str(home / "plugins" / "p.py")}).status_code == 403
@@ -415,7 +471,8 @@ index 0000000000..8d3817aab7
 +    other.mkdir()
 +    subprocess.run(["git", "init", "-q", str(other)], check=True)
 +    assert client.post("/api/git/review/stage", json={"path": str(other), "file": "x"}).status_code == 403
-+    assert client.post("/api/git/review/commit", json={"path": str(home), "message": "m"}).status_code == 403
++    denied = client.post("/api/git/review/commit", json={"path": str(home), "message": "m"})
++    assert denied.status_code == 403 and "Git changes are not allowed here" in denied.text
 +    assert client.get("/api/git/status", params={"path": str(home / "webapp")}).status_code == 403
 +
 +

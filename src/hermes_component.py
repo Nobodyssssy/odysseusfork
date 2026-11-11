@@ -38,10 +38,7 @@ def _git(path, *args, check=True):
 
 
 _PATCH_FLAGS = ('apply', '--ignore-whitespace', '--whitespace=nowarn')
-_PATCHES = {
-    'webui': 'integrations/hermes-mode/patches/webui-trusted-workspaces.patch',
-    'agent': 'integrations/hermes-mode/patches/webapp-route-guard.patch',
-}
+_PATCHES = {'webui': 'integrations/hermes-mode/patches/webui-trusted-workspaces.patch'}
 
 
 def patch_file(application_root, name):

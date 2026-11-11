@@ -162,6 +162,9 @@ def _build_backup(odysseus_root, hermes_home, backup_root, startup_files=(), tas
                 continue
             if path.name.endswith(('-wal', '-shm', '-journal')):
                 continue
+            if path.name.startswith('hermes-grants.db'):          # short-lived access grants: a restore must never revive one
+                excluded.append(str(path))
+                continue
             if _is_reparse(path):
                 raise ValueError('Backup encountered a reparse point; no complete backup was declared')
             if path.is_dir():
@@ -186,6 +189,10 @@ def _build_backup(odysseus_root, hermes_home, backup_root, startup_files=(), tas
         for path in sorted((component / 'managed').glob('*.json')):
             if path.is_file():
                 copy(path, Path('component/managed') / path.name)
+    if component and (component / 'managed' / 'webapp' / 'component.json').is_file():
+        copy(component / 'managed' / 'webapp' / 'component.json', Path('component/managed/webapp/component.json'))
+    if component and (component / 'state' / 'hermes-gateway').is_dir():       # the Webapp gateway's own sessions and settings; its sign-in credential is regenerated, not saved
+        tree(component / 'state' / 'hermes-gateway', Path('component/state/hermes-gateway'), ('webapp', 'logs', 'cache', 'tmp'))
     for source in startup_files:
         source = Path(source)
         if source.is_file():
