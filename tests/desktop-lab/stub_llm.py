@@ -145,6 +145,9 @@ class Handler(BaseHTTPRequestHandler):
                     sent += 1
                     time.sleep(0.4)
                 chunk({}, 'stop', {'prompt_tokens': 10, 'completion_tokens': 60, 'total_tokens': 70})
+                done = b'data: [DONE]\n\n'
+                self.wfile.write(f'{len(done):x}\r\n'.encode() + done + b'\r\n0\r\n\r\n')
+                self.wfile.flush()
                 outcome = 'completed'
             except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
                 outcome = 'client-disconnected'

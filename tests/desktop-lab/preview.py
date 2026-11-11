@@ -24,7 +24,8 @@ FULL = LAB / 'ody-full-venv/Scripts/python.exe'
 HERMES_PY = Path(r'C:\Users\Protagonist\AppData\Local\hermes\installs\562e58e2ea9aca80\environments\6eff8cc60cb848909fbabec0b09c88c2\venv\Scripts\python.exe')
 AGENT = LAB / 'src'
 GATEWAY_HOME = LAB / 'home'
-ODY_PORT, GW_PORT = 19800, 19120
+MANAGED = os.environ.get('PREVIEW_MANAGED_ROOT')           # a component root installed by hermes-webapp-component.py: Odysseus starts the gateway itself
+ODY_PORT, GW_PORT = 19800, (19130 if MANAGED else 19120)
 ENV_MARKER = '# Isolated preview; configuration is supplied by preview.py.\n'
 ADMIN = 'labadmin'
 FORBIDDEN = {7000, 8100, 8787, 9120}
@@ -33,7 +34,7 @@ FORBIDDEN = {7000, 8100, 8787, 9120}
 def child_env():
     keep = ('SystemRoot', 'SYSTEMROOT', 'SystemDrive', 'windir', 'ComSpec', 'PATHEXT', 'OS', 'PROCESSOR_ARCHITECTURE', 'NUMBER_OF_PROCESSORS')
     env = {k: os.environ[k] for k in keep if k in os.environ}
-    env['PATH'] = str(FULL.parent) + ';C:\\Windows\\System32;C:\\Windows'
+    env['PATH'] = str(FULL.parent) + ';C:\\Program Files\\Git\\cmd;C:\\Windows\\System32;C:\\Windows'
     for key in ('TEMP', 'TMP'):
         env[key] = str(PV / 'tmp')
     for key in ('USERPROFILE', 'HOME'):
@@ -52,6 +53,10 @@ def child_env():
         'ODYSSEUS_HERMES_GATEWAY_HOME': str(GATEWAY_HOME), 'ODYSSEUS_HERMES_GATEWAY_PYTHON': str(HERMES_PY),
         'ODYSSEUS_HERMES_GATEWAY_AGENT_DIR': str(AGENT), 'ODYSSEUS_HERMES_PROXY_MODE': 'gateway',
     })
+    if MANAGED:
+        for key in ('ODYSSEUS_HERMES_MODE_URL', 'ODYSSEUS_HERMES_GATEWAY_HOME', 'ODYSSEUS_HERMES_GATEWAY_PYTHON', 'ODYSSEUS_HERMES_GATEWAY_AGENT_DIR'):
+            env.pop(key)
+        env.update({'ODYSSEUS_HERMES_COMPONENT_ROOT': MANAGED, 'ODYSSEUS_HERMES_BACKEND': 'webapp'})
     env.update({k[len('PREVIEW_ENV_'):]: v for k, v in os.environ.items() if k.startswith('PREVIEW_ENV_')})
     return env
 
@@ -60,6 +65,7 @@ def guard():
     assert ODY_PORT not in FORBIDDEN and GW_PORT not in FORBIDDEN
     assert str(PV).lower().startswith(str(LAB).lower())
     assert 'Odysseus-Backups' in str(GATEWAY_HOME)
+    assert not MANAGED or str(MANAGED).lower().startswith(str(LAB).lower())
 
 
 def setup():

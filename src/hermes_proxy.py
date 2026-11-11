@@ -676,7 +676,7 @@ def install_hermes_proxy(app, service, environment=None):
     source = os.environ if environment is None else environment
     if service.config is None or source.get('ODYSSEUS_HERMES_PROXY') == '0':
         return False
-    mode = source.get('ODYSSEUS_HERMES_PROXY_MODE') or 'webui'
+    mode = source.get('ODYSSEUS_HERMES_PROXY_MODE') or ('gateway' if service.config.backend == 'gateway' else 'webui')
     try:
         if mode not in MODES:
             raise ProxyConfigError(f'ODYSSEUS_HERMES_PROXY_MODE must be one of {MODES}')

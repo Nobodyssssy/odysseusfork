@@ -641,6 +641,50 @@ class WebappComponent:
             raise ComponentError('This gateway is user-owned (adopted); Odysseus never starts, stops or restarts it.')
         return config
 
+    PROTECTED_PATHS = 'vault/odysseus-protected-paths.json'
+
+    def protected_paths_file(self, config=None):
+        config = config or self.config()
+        if not config or config.get('origin') != 'managed':
+            raise ComponentError('The blocked-folder list belongs to a managed gateway home; an adopted home is never written.')
+        return Path(config['home']) / self.PROTECTED_PATHS
+
+    def blocked_folders(self):
+        """The folders the route guard refuses (the neutral list, else the retired WebUI's). Never raises on a missing file."""
+        config = self.config()
+        if not config:
+            return []
+        neutral = self.protected_paths_file(config) if config.get('origin') == 'managed' else None
+        for path in (neutral, Path(config['home']) / 'vault' / 'webui-trusted-workspaces.json'):
+            if path and path.is_file():
+                try:
+                    return [item['path'] for item in json.loads(path.read_text(encoding='utf-8')).get('blocked') or [] if isinstance(item, dict) and item.get('path')]
+                except (OSError, ValueError, AttributeError):
+                    raise ComponentError(f'{path.name} is unreadable; the route guard will refuse writes until it is repaired.')
+        return []
+
+    def set_blocked_folders(self, paths):
+        """Write the neutral list. The first write imports the retired WebUI list, so adopting this store never loses an existing entry."""
+        config = self._require_managed()
+        target = self.protected_paths_file(config)
+        existing = self.blocked_folders()
+        wanted = []
+        for item in list(existing) + list(paths):
+            item = os.path.normpath(str(item))
+            if item not in wanted:
+                wanted.append(item)
+        private_directory(target.parent)
+        atomic_json(target, {'version': 1, 'blocked': [{'path': item} for item in wanted]})
+        return wanted
+
+    def remove_blocked_folder(self, path):
+        config = self._require_managed()
+        target = self.protected_paths_file(config)
+        keep = [item for item in self.blocked_folders() if os.path.normcase(os.path.normpath(item)) != os.path.normcase(os.path.normpath(str(path)))]
+        private_directory(target.parent)
+        atomic_json(target, {'version': 1, 'blocked': [{'path': item} for item in keep]})
+        return keep
+
     def route_guard_patch(self):
         path = (self.application_root / ROUTE_GUARD_PATCH).resolve()
         if not path.is_file():
@@ -719,7 +763,7 @@ class WebappComponent:
                 return self.status()
             sessions = self.active_sessions()
             if (sessions is None or sessions > 0) and not force:
-                raise controls.ActiveRuns(sessions if sessions else 1)
+                raise controls.ActiveRuns(sessions if sessions else 1, recent=True)
             controls.kill_tree(self.owned_listener(config))
             port = loopback_port(config['url'])
             deadline = time.monotonic() + 30

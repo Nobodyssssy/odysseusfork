@@ -80,12 +80,25 @@ async function hermesAction(kind) {
   }
 }
 
+function describe(status) {
+  const managed = status.managed === true;
+  switch (status.state) {
+    case 'ready': return status.busy ? `Hermes is ready; ${status.active_runs} session(s) active in the last 5 minutes` : 'Hermes is ready';
+    case 'starting': return 'Hermes is starting…';
+    case 'stopped': return managed ? 'Hermes is stopped; it starts when you open Projects' : 'Hermes is not running';
+    case 'error': return `Hermes could not start: ${status.error || 'see the gateway log'}`;
+    case 'conflict': return 'Another program is using the Hermes port; nothing was touched';
+    default: return 'Hermes is not responding';
+  }
+}
+
 async function waitForHermes(message) {
   const deadline = Date.now() + 90000;
   for (;;) {
     const status = await request(endpoint);
     if (status.state === 'ready') return status;
     if (status.state === 'conflict') throw new Error('Another program is using the Hermes port. Nothing was restarted.');
+    if (status.state === 'error') throw new Error(describe(status));
     if (Date.now() > deadline) throw new Error('Hermes did not become ready in 90 seconds. Check its launch log.');
     message.textContent = 'Starting Hermes…';
     await new Promise(resolve => setTimeout(resolve, 1000));
@@ -112,6 +125,12 @@ async function waitForOdysseus(message) {
 function serviceMenu(status, message) {
   const available = status.controls || {};
   const actions = [
+    ['hermes_start', 'Start Hermes', async () => {
+      message.textContent = 'Starting Hermes…';
+      await request(`${endpoint}/hermes/start`, 'POST');
+      await waitForHermes(message);
+      message.textContent = 'Hermes is ready.';
+    }],
     ['hermes_restart', 'Restart Hermes', async () => {
       message.textContent = 'Restarting Hermes…';
       await hermesAction('restart');
@@ -149,7 +168,7 @@ function serviceMenu(status, message) {
       for (const other of list.querySelectorAll('button')) other.disabled = true;
       try { await run(); }
       catch (error) { message.textContent = error.name === 'TimeoutError' ? 'The request timed out; check the service state before retrying.' : error.message; }
-      finally { for (const other of list.querySelectorAll('button')) other.disabled = false; }
+      finally { for (const other of list.querySelectorAll('button')) other.disabled = false; document.dispatchEvent(new Event('hermes-state-changed')); }
     });
     list.append(button);
   }
@@ -234,7 +253,16 @@ async function initialize() {
   const rememberPage = () => { providers.href = '/static/provider-sync.html?return=' + encodeURIComponent(location.pathname + location.search + location.hash); };
   for (const type of ['pointerenter', 'focus', 'click', 'auxclick']) providers.addEventListener(type, rememberPage);
   const services = serviceMenu(status, message);
-  bar.append(selector, ...(gateway ? [] : [providers]), ...(services ? [services] : []), message);
+  const health = document.createElement('span');
+  health.id = 'application-mode-hermes-state';
+  health.setAttribute('aria-live', 'polite');
+  health.style.cssText = 'margin-left:8px;opacity:.75;font-size:.85em';
+  const refreshHealth = async () => {
+    if (document.hidden) return;
+    try { health.textContent = describe(await request(endpoint)); } catch (_) { health.textContent = ''; }
+  };
+  if (gateway) { health.textContent = describe(status); setInterval(refreshHealth, 15000); document.addEventListener('hermes-state-changed', refreshHealth); }
+  bar.append(selector, ...(gateway ? [] : [providers]), ...(services ? [services] : []), ...(gateway ? [health] : []), message);
   document.querySelector('#chat-container').prepend(bar);
   try { await restoreChatState(message); }
   catch (_) { message.textContent = 'The saved draft could not be restored. Your current composer was not changed.'; }
@@ -245,14 +273,15 @@ async function initialize() {
     try {
       await assertCanLeave();
       status = await request(endpoint);
-      if (gateway && status.state !== 'ready') throw new Error('The official Hermes Webapp is not running. Odysseus does not start it; start it first.');
-      if (status.state !== 'ready') {
+      if (gateway && status.state !== 'ready' && !status.managed) throw new Error('The official Hermes Webapp is not running and is not managed by Odysseus; start it yourself first.');
+      if (status.state !== 'ready' && status.state !== 'starting') {
         message.textContent = 'Starting Hermes…';
         status = await request(`${endpoint}/hermes/start`, 'POST');
       }
       const deadline = Date.now() + 90000;
       while (status.state !== 'ready' && Date.now() < deadline) {
         if (status.state === 'conflict') throw new Error('Another program is using the Hermes port. No existing process was restarted.');
+        if (status.state === 'error') throw new Error(describe(status));
         message.textContent = 'Starting Hermes…';
         await new Promise(resolve => setTimeout(resolve, 1000));
         status = await request(endpoint);

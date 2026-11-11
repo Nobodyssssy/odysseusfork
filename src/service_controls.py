@@ -26,8 +26,11 @@ class Unavailable(RuntimeError):
 
 
 class ActiveRuns(RuntimeError):
-    def __init__(self, count):
-        super().__init__(f'{count} Hermes run(s) are still active; stopping now would interrupt them.')
+    def __init__(self, count, recent=False):
+        if recent:        # the gateway only reports sessions touched in the last five minutes, not live runs
+            super().__init__(f'{count} Hermes session(s) were active in the last five minutes; a run may still be in progress and stopping now would interrupt it.')
+        else:
+            super().__init__(f'{count} Hermes run(s) are still active; stopping now would interrupt them.')
         self.count = count
 
 

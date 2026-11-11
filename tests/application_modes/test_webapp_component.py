@@ -109,6 +109,9 @@ class ComponentCase(unittest.TestCase):
         self.app = self.tmp / 'app'
         (self.app / 'config').mkdir(parents=True)
         self.write_lock(self.sha)
+        guard = self.app / 'integrations/hermes-mode/patches'
+        guard.mkdir(parents=True)
+        shutil.copy(ROOT / 'integrations/hermes-mode/patches/webapp-route-guard.patch', guard / 'webapp-route-guard.patch')
         plugin = self.app / 'integrations/hermes-mode/desktop-plugins/odysseus-return'
         plugin.mkdir(parents=True)
         shutil.copy(ROOT / 'integrations/hermes-mode/desktop-plugins/odysseus-return/plugin.js', plugin / 'plugin.js')
@@ -130,7 +133,9 @@ class ComponentCase(unittest.TestCase):
                                    'sign_in_gate_configured': self.gate, 'plugins_enabled': []})
             return ''
         patches = [mock.patch.object(hwc, 'probe_python', lambda *a, **k: {}), mock.patch.object(hwc, 'checkout_source', self.local_checkout),
-                   mock.patch.object(WebappComponent, '_hermes_yaml', fake_yaml)]
+                   mock.patch.object(WebappComponent, '_hermes_yaml', fake_yaml),
+                   # the fake upstream cannot carry the real patch; applying it to a real pin is covered by test_webapp_route_guard_component and the real install
+                   mock.patch.object(WebappComponent, 'route_guard_state', lambda component, config: 'applied' if config.get('origin') == 'managed' else 'absent')]
         for item in patches:
             item.start()
             self.addCleanup(item.stop)

@@ -19,7 +19,9 @@ from src.runtime_paths import get_hermes_component_root
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=('plan', 'ensure', 'repair', 'status', 'start', 'stop', 'restart', 'rollback', 'disable', 'enable'))
+    parser.add_argument('action', choices=('plan', 'ensure', 'repair', 'status', 'start', 'stop', 'restart', 'rollback', 'disable', 'enable', 'blocked'))
+    parser.add_argument('--block', action='append', default=[], help='blocked: add a folder the gateway must never read, write or delete')
+    parser.add_argument('--unblock', action='append', default=[], help='blocked: remove a folder from the list')
     parser.add_argument('--root', type=Path)
     parser.add_argument('--origin', choices=('managed', 'adopted'), default='managed')
     parser.add_argument('--agent', type=Path, help='adopted: the existing Hermes agent checkout')
@@ -52,6 +54,12 @@ def main(argv=None):
             payload = component.restart(force=args.force)
         elif args.action == 'rollback':
             payload = component.rollback()
+        elif args.action == 'blocked':
+            if args.block:
+                component.set_blocked_folders(args.block)
+            for item in args.unblock:
+                component.remove_blocked_folder(item)
+            payload = {'blocked': component.blocked_folders()}
         else:
             component.disable()
             payload = {'enabled': False, 'state': 'disabled', 'processes_stopped': False}

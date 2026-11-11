@@ -14,7 +14,8 @@ import time
 import urllib.request
 
 LAB = r'F:\Odysseus-Backups\desktop-lab'
-SRC = LAB + r'\src'
+SRC = os.environ.get('LAB_AGENT_SRC') or (LAB + r'\src')                 # LAB_AGENT_SRC: run the lab gateway from another agent checkout (e.g. the route-guard tree)
+DIST = LAB + r'\src\apps\desktop\dist-webapp'
 VENV = r'C:\Users\Protagonist\AppData\Local\hermes\installs\562e58e2ea9aca80\environments\6eff8cc60cb848909fbabec0b09c88c2\venv'
 PY = VENV + r'\Scripts\python.exe'
 HOME, SAFE, OUT, CWD = (LAB + p for p in (r'\home', r'\work\safe', r'\work\outside', r'\work\cwd'))
@@ -97,8 +98,8 @@ def gateway_env(api_key):
                           sysroot + r'\System32\WindowsPowerShell\v1.0']),
         'USERPROFILE': LAB + r'\userhome', 'HOME': LAB + r'\userhome', 'APPDATA': LAB + r'\userhome\AppData\Roaming',
         'LOCALAPPDATA': LAB + r'\userhome\AppData\Local', 'TEMP': LAB + r'\tmp', 'TMP': LAB + r'\tmp',
-        'HERMES_HOME': HOME, 'HERMES_WRITE_SAFE_ROOT': (SAFE + os.pathsep + HOME) if json.load(open(STATE)).get('wide') else SAFE, 'PYTHONPATH': SRC, 'PYTHONDONTWRITEBYTECODE': '1', 'PYTHONUTF8': '1',
-        'HERMES_WEBAPP_DIST': SRC + r'\apps\desktop\dist-webapp', 'API_SERVER_ENABLED': 'true', 'API_SERVER_KEY': api_key,
+        'HERMES_HOME': HOME, 'HERMES_WRITE_SAFE_ROOT': ((SAFE + os.pathsep + HOME) if json.load(open(STATE)).get('wide') else SAFE) + ((os.pathsep + CWD) if os.environ.get('LAB_SAFE_CWD') else ''), 'PYTHONPATH': SRC, 'PYTHONDONTWRITEBYTECODE': '1', 'PYTHONUTF8': '1',
+        'HERMES_WEBAPP_DIST': DIST, 'API_SERVER_ENABLED': 'true', 'API_SERVER_KEY': api_key,
         'API_SERVER_PORT': str(PORTS['api']), 'API_SERVER_HOST': '127.0.0.1', 'HERMES_ACCEPT_HOOKS': '1',
     }
 

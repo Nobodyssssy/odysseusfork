@@ -20,6 +20,9 @@ class ModeConfig:
     backend: str = 'webui'
     launcher: tuple[str, ...] = ()
     launcher_cwd: Path | None = None
+    component_root: Path | None = None            # set when the gateway is the managed Webapp component
+    component_environment: dict[str, str] | None = None
+    ownership: str = ''                           # 'managed' (Odysseus may start/stop it) or 'adopted' (it never does)
 
     @classmethod
     def gateway_from_environment(cls, source):
@@ -43,12 +46,34 @@ class ModeConfig:
         return cls(url=url, environment=child_env, backend='gateway', launcher=command, launcher_cwd=Path(agent))
 
     @classmethod
+    def webapp_from_environment(cls, source):
+        """The official Webapp installed by scripts/hermes-webapp-component.py. Managed: Odysseus starts it on demand and may stop it.
+        Adopted: the user's own gateway, which Odysseus only talks to. Not installed or disabled: Projects mode is simply absent."""
+        from src.hermes_webapp_component import WebappComponent
+        from src.runtime_paths import get_app_root, get_hermes_component_root
+        root = get_hermes_component_root(source)
+        if not root:
+            return None
+        component = WebappComponent(root, application_root=get_app_root(), environment=dict(source))
+        saved = component.config()
+        if not saved or not saved['enabled']:
+            return None
+        child_env = {key: value for key, value in source.items() if key not in ('PYTHONPATH', 'PYTHONHOME') and not key.startswith('ODYSSEUS_')}
+        child_env['HERMES_HOME'] = str(Path(saved['home']))
+        child_env['PYTHONPATH'] = str(Path(saved['agent']))
+        command = (saved['python'], '-B', str(Path(get_app_root()) / 'scripts/hermes-webapp-launch.py'), '--home', str(Path(saved['home'])))
+        return cls(url=saved['url'], environment=child_env, backend='gateway', launcher=command, launcher_cwd=Path(saved['agent']),
+                   component_root=Path(root), component_environment=dict(source), ownership=saved['origin'])
+
+    @classmethod
     def from_environment(cls, environment=None):
         source = os.environ if environment is None else environment
         if source.get('ODYSSEUS_HERMES_DISABLED') == '1':
             return None
         if source.get('ODYSSEUS_HERMES_BACKEND') == 'gateway':
             return cls.gateway_from_environment(source)
+        if source.get('ODYSSEUS_HERMES_BACKEND') == 'webapp':
+            return cls.webapp_from_environment(source)
         from src.hermes_component import read_config
         from src.runtime_paths import get_app_root, get_hermes_component_root
         root = get_hermes_component_root(source)
@@ -134,8 +159,73 @@ class ModeService:
         self.grants = None                     # set by install_hermes_proxy in gateway mode when access grants are on
         self._lock = threading.Lock()
         self._process = None
+        self._starter = None                   # background thread running the component's start (managed gateway only)
+        self._start_error = None
+        self._component_cache = None
+
+    @property
+    def managed(self):
+        return bool(self.config and self.config.component_root)
+
+    def _component(self):
+        if self._component_cache is None:
+            from src.hermes_webapp_component import WebappComponent
+            from src.runtime_paths import get_app_root
+            self._component_cache = WebappComponent(self.config.component_root, application_root=get_app_root(), environment=self.config.component_environment)
+        return self._component_cache
+
+    def _start_managed(self):
+        component = self._component()
+        with self._lock:
+            raw = component.status().get('state')           # decide on the component's own answer, not on the 'starting'/'error' decoration
+            current = self._managed_status()
+            if raw == 'ready':
+                return current
+            if self._starter is not None and self._starter.is_alive():
+                return {**current, 'state': 'starting'}
+            if self.config.ownership != 'managed':
+                raise RuntimeError('This Hermes gateway is user-owned (adopted); Odysseus never starts it. Start it yourself.')
+            if raw != 'stopped':
+                raise RuntimeError('The Hermes port is in use by something that is not a ready Webapp gateway; no takeover was attempted.')
+            self._start_error = None
+
+            def run():
+                try:
+                    component.start(wait=True, timeout=180)
+                except Exception as exc:                    # recorded for the status line; never raised into the request thread
+                    self._start_error = str(exc)[:300] or 'The gateway failed to start.'
+
+            self._starter = threading.Thread(target=run, name='hermes-webapp-start', daemon=True)
+            self._starter.start()
+            return {**current, 'state': 'starting'}
+
+    def _managed_status(self):
+        info = self._component().status()
+        result = {'enabled': True, 'url': self.config.url, 'owned': self.config.ownership == 'managed', 'managed': self.config.ownership == 'managed',
+                  'ownership': self.config.ownership, 'backend': self.config.backend, 'route_guard': info.get('route_guard'), 'revision': info.get('revision')}
+        if self.proxy:
+            from src.hermes_proxy import hostname_resolves
+            result['proxy'] = hostname_resolves()
+        state = info.get('state')
+        result['state'] = state if state in ('ready', 'stopped', 'conflict', 'unavailable') else 'unavailable'
+        if 'sign_in_gate' in info:
+            result['sign_in_gate'] = info['sign_in_gate']
+        starting = self._starter is not None and self._starter.is_alive()
+        if state == 'ready':
+            self._start_error = None
+            runs = self._component().active_sessions()
+            result['active_runs'] = runs
+            result['busy'] = bool(runs)
+        elif starting:
+            result['state'] = 'starting'
+        elif self._start_error:
+            result['state'] = 'error'
+            result['error'] = self._start_error
+        return result
 
     def start(self):
+        if self.managed and not self.error:
+            return self._start_managed()
         with self._lock:
             if self.error:
                 raise RuntimeError(self.error)
@@ -173,6 +263,8 @@ class ModeService:
         return health if ok else None
 
     def can_start(self):
+        if self.managed:
+            return self.config.ownership == 'managed'
         return bool(self.config and self.config.command and self.config.log_dir)
 
     def _gateway_status(self, result, port):
@@ -222,6 +314,14 @@ class ModeService:
     def stop(self, force=False):
         """Stop Hermes only when the port answers as Hermes; refuse while runs are active unless ``force``."""
         from src import service_controls as controls
+        if self.managed and not self.error:
+            if self.config.ownership != 'managed':
+                raise controls.Unavailable('This Hermes gateway is user-owned (adopted); Odysseus never stops it.')
+            if self._starter is not None and self._starter.is_alive():
+                raise controls.Unavailable('Hermes is still starting; wait for it to finish before stopping it.')
+            self._start_error = None
+            self._component().stop(force=force)             # raises ActiveRuns unless force; only ever the process Odysseus provisioned
+            return self._managed_status()
         with self._lock:
             if self.error or not self.config:
                 raise RuntimeError('Hermes is not configured here.')
@@ -250,6 +350,9 @@ class ModeService:
             return self.status()
 
     def restart(self, force=False):
+        if self.managed and not self.error:
+            self.stop(force)
+            return self.start()
         if not self.can_start():
             from src import service_controls as controls
             raise controls.Unavailable('Optional Hermes startup is not configured, so it could not be started again.')
@@ -266,6 +369,8 @@ class ModeService:
         if self.proxy:
             from src.hermes_proxy import hostname_resolves
             result['proxy'] = hostname_resolves()
+        if self.managed:
+            return self._managed_status()
         if self.config.backend == 'gateway':
             return self._gateway_status(result, port)
         connection = http.client.HTTPConnection('127.0.0.1', port, timeout=2)
@@ -363,8 +468,9 @@ def make_router(service):
         result = service.status()
         if isinstance(result, dict) and result.get('enabled'):
             available = controls.availability(getattr(service, 'can_start', lambda: False)() is True)
-            if result.get('backend') == 'gateway':
+            if result.get('backend') == 'gateway' and not result.get('managed'):
                 available = {**available, 'hermes_stop': False, 'hermes_restart': False}
+            available = {**available, 'hermes_start': bool(result.get('managed'))}
             result = {**result, 'controls': available}
         return result
 
