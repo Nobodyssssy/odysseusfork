@@ -610,14 +610,90 @@ index 000000000..41c99ed8a
 +        file_operations.get_write_denied_error = _guard(current)
 +    _HOOKED = True
 +    return True
+diff --git a/api/windows_console.py b/api/windows_console.py
+new file mode 100644
+index 000000000..eabc74fd8
+--- /dev/null
++++ b/api/windows_console.py
+@@ -0,0 +1,64 @@
++"""Stop console child processes of the windowless WebUI from opening Windows Terminal windows.
++
++The WebUI normally runs as ``pythonw.exe`` (no console). A console program it starts without
++``CREATE_NO_WINDOW`` (the Claude provider's ``claude.exe``, ``taskkill``, ``reg``, MCP launchers, ...)
++gets a brand-new console, and with Windows Terminal as the default terminal each one opens a window.
++
++This adds ``CREATE_NO_WINDOW`` to ``subprocess.Popen`` calls in a console-less Windows process, and
++only when the caller did not choose its own console behaviour. It never removes a window the caller
++asked for, never touches a process that has a console, and is inert off Windows. Set
++``HERMES_WEBUI_SHOW_CONSOLES=1`` to turn it off.
++"""
++import os
++import subprocess
++import sys
++
++CREATE_NEW_CONSOLE = 0x00000010
++DETACHED_PROCESS = 0x00000008
++CREATE_NO_WINDOW = 0x08000000
++_CALLER_CHOSE = CREATE_NEW_CONSOLE | DETACHED_PROCESS | CREATE_NO_WINDOW
++_CREATIONFLAGS_POSITION = 13        # Popen(args, bufsize, executable, stdin, stdout, stderr, preexec_fn,
++                                    #       close_fds, shell, cwd, env, universal_newlines, startupinfo, creationflags)
++
++
++def _has_console():
++    try:
++        import ctypes
++        return bool(ctypes.windll.kernel32.GetConsoleWindow())
++    except Exception:
++        return True                 # unknown: do not change behaviour
++
++
++def active():
++    return bool(getattr(subprocess.Popen, '_hermes_no_console', False))
++
++
++def install(force=False):
++    """Wrap ``subprocess.Popen.__init__`` once. Returns True when the wrapper is active."""
++    if active():
++        return True
++    if not force:
++        if os.name != 'nt' or os.environ.get('HERMES_WEBUI_SHOW_CONSOLES', '').strip() == '1' or _has_console():
++            return False
++    original = subprocess.Popen.__init__
++
++    def __init__(self, *args, **kwargs):
++        if len(args) <= _CREATIONFLAGS_POSITION:
++            flags = kwargs.get('creationflags', 0) or 0
++            if not flags & _CALLER_CHOSE:
++                kwargs['creationflags'] = flags | CREATE_NO_WINDOW
++        original(self, *args, **kwargs)
++
++    __init__._hermes_original = original
++    subprocess.Popen.__init__ = __init__
++    subprocess.Popen._hermes_no_console = True
++    return True
++
++
++def uninstall():
++    wrapper = subprocess.Popen.__init__
++    original = getattr(wrapper, '_hermes_original', None)
++    if original is not None:
++        subprocess.Popen.__init__ = original
++    if hasattr(subprocess.Popen, '_hermes_no_console'):
++        del subprocess.Popen._hermes_no_console
 diff --git a/server.py b/server.py
-index adff2c140..332f42bd6 100644
+index adff2c140..b8e17e56a 100644
 --- a/server.py
 +++ b/server.py
-@@ -582,6 +582,13 @@ def main() -> None:
+@@ -582,6 +582,19 @@ def main() -> None:
  
      fix_credential_permissions()
  
++    try:
++        from api import windows_console
++        windows_console.install()
++    except Exception as exc:  # cosmetic only: never stop Hermes over console windows
++        print(f"[!!] Console-window suppression could not start: {exc}", flush=True)
++
 +    try:
 +        from api import trusted_workspaces
 +        if trusted_workspaces.init():
@@ -1226,6 +1302,120 @@ index 000000000..1037c4b8c
 +            self.assertIsNone(wrapped(str(self.base / 'ok.txt')))
 +        finally:
 +            file_operations.get_write_denied_error = original
++
++
++if __name__ == '__main__':
++    unittest.main()
+diff --git a/tests/test_windows_console.py b/tests/test_windows_console.py
+new file mode 100644
+index 000000000..f7f4ddbef
+--- /dev/null
++++ b/tests/test_windows_console.py
+@@ -0,0 +1,108 @@
++"""Console-window suppression for the windowless WebUI."""
++import os
++from pathlib import Path
++import subprocess
++import sys
++import tempfile
++import time
++import unittest
++from unittest import mock
++
++ROOT = Path(__file__).resolve().parent.parent
++sys.path.insert(0, str(ROOT))
++
++from api import windows_console as wc  # noqa: E402
++
++
++class FlagLogicTests(unittest.TestCase):
++    def setUp(self):
++        wc.uninstall()
++        self.calls = []
++        self.real = subprocess.Popen.__init__
++        subprocess.Popen.__init__ = lambda inst, *a, **k: self.calls.append((a, k))     # records instead of spawning
++        self.addCleanup(self._restore)
++
++    def _restore(self):
++        wc.uninstall()
++        subprocess.Popen.__init__ = self.real
++
++    def spawn(self, *args, **kwargs):
++        wc.install(force=True)
++        subprocess.Popen(*args, **kwargs)
++        return self.calls[-1]
++
++    def test_adds_no_window_when_the_caller_said_nothing(self):
++        _, kwargs = self.spawn(['x'])
++        self.assertEqual(kwargs['creationflags'], wc.CREATE_NO_WINDOW)
++
++    def test_keeps_other_flags(self):
++        _, kwargs = self.spawn(['x'], creationflags=subprocess.CREATE_NEW_PROCESS_GROUP)
++        self.assertEqual(kwargs['creationflags'], subprocess.CREATE_NEW_PROCESS_GROUP | wc.CREATE_NO_WINDOW)
++
++    def test_respects_an_explicit_console_choice(self):
++        for flag in (wc.CREATE_NEW_CONSOLE, wc.DETACHED_PROCESS, wc.CREATE_NO_WINDOW):
++            _, kwargs = self.spawn(['x'], creationflags=flag)
++            self.assertEqual(kwargs['creationflags'], flag)
++
++    def test_positional_creationflags_are_left_alone(self):
++        args = (['x'], -1, None, None, None, None, None, True, False, None, None, False, None, subprocess.CREATE_NEW_PROCESS_GROUP)
++        got_args, kwargs = self.spawn(*args)
++        self.assertEqual(got_args, args)
++        self.assertNotIn('creationflags', kwargs)
++
++    def test_install_is_idempotent_and_reversible(self):
++        wc.install(force=True)
++        wrapped = subprocess.Popen.__init__
++        wc.install(force=True)
++        self.assertIs(subprocess.Popen.__init__, wrapped, 'a second install must not stack wrappers')
++        self.assertTrue(wc.active())
++        wc.uninstall()
++        self.assertFalse(wc.active())
++
++    def test_inert_without_force_when_a_console_exists_or_opted_out(self):
++        with mock.patch.object(wc, '_has_console', return_value=True):
++            self.assertFalse(wc.install())
++        with mock.patch.object(wc, '_has_console', return_value=False), \
++                mock.patch.dict(os.environ, {'HERMES_WEBUI_SHOW_CONSOLES': '1'}):
++            self.assertFalse(wc.install())
++
++
++@unittest.skipUnless(os.name == 'nt', 'Windows consoles')
++class RealWindowlessParentTests(unittest.TestCase):
++    PROBE = (
++        'import ctypes, subprocess, sys\n'
++        'sys.path.insert(0, r"%s")\n'
++        'from api import windows_console as wc\n'
++        'if sys.argv[1] == "on": wc.install()\n'
++        'code = "import ctypes;print(ctypes.windll.kernel32.GetConsoleWindow())"\n'
++        'out = subprocess.run([sys.argv[2], "-c", code], capture_output=True, text=True)\n'
++        'open(sys.argv[3], "w").write("parent_console=%%d child_window=%%s" %% (ctypes.windll.kernel32.GetConsoleWindow(), out.stdout.strip()))\n'
++    ) % ROOT
++
++    def run_probe(self, mode):
++        base = Path(getattr(sys, '_base_executable', sys.executable))
++        pythonw = base.with_name('pythonw.exe')
++        if not pythonw.exists():
++            self.skipTest('pythonw.exe not found')
++        with tempfile.TemporaryDirectory() as tmp:
++            script, result = Path(tmp) / 'probe.py', Path(tmp) / 'result.txt'
++            script.write_text(self.PROBE, encoding='utf-8')
++            subprocess.run([str(pythonw), str(script), mode, str(base), str(result)], timeout=60)
++            deadline = time.time() + 20
++            while not result.exists() and time.time() < deadline:
++                time.sleep(0.2)
++            return result.read_text()
++
++    def test_without_the_fix_a_windowless_parent_gives_its_child_a_window(self):
++        text = self.run_probe('off')
++        self.assertIn('parent_console=0', text)
++        self.assertNotIn('child_window=0', text, 'baseline: the child normally gets a visible console')
++
++    def test_with_the_fix_the_child_has_no_window(self):
++        text = self.run_probe('on')
++        self.assertIn('parent_console=0', text)
++        self.assertIn('child_window=0', text)
 +
 +
 +if __name__ == '__main__':
