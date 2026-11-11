@@ -1,0 +1,698 @@
+[
+ {
+  "group": "A-auth",
+  "test": "no credential: GET /api/sessions",
+  "expected": "401|403",
+  "got": "401",
+  "verdict": "PASS",
+  "note": ""
+ },
+ {
+  "group": "A-auth",
+  "test": "no credential: GET /api/config",
+  "expected": "401|403",
+  "got": "401",
+  "verdict": "PASS",
+  "note": ""
+ },
+ {
+  "group": "A-auth",
+  "test": "no credential: GET /api/fs/list?path=C:/",
+  "expected": "401|403",
+  "got": "401",
+  "verdict": "PASS",
+  "note": ""
+ },
+ {
+  "group": "A-auth",
+  "test": "no credential: GET /api/files?path=.",
+  "expected": "401|403",
+  "got": "401",
+  "verdict": "PASS",
+  "note": ""
+ },
+ {
+  "group": "A-auth",
+  "test": "no credential: GET /api/git/status?path=.",
+  "expected": "401|403",
+  "got": "401",
+  "verdict": "PASS",
+  "note": ""
+ },
+ {
+  "group": "A-auth",
+  "test": "no credential: GET /api/mcp/servers",
+  "expected": "401|403",
+  "got": "401",
+  "verdict": "PASS",
+  "note": ""
+ },
+ {
+  "group": "A-auth",
+  "test": "no credential: GET /api/profiles",
+  "expected": "401|403",
+  "got": "401",
+  "verdict": "PASS",
+  "note": ""
+ },
+ {
+  "group": "A-auth",
+  "test": "no credential: POST /api/fs/write-text",
+  "expected": "401|403",
+  "got": "401",
+  "verdict": "PASS",
+  "note": ""
+ },
+ {
+  "group": "A-auth",
+  "test": "no credential: DELETE /api/files",
+  "expected": "401|403",
+  "got": "401",
+  "verdict": "PASS",
+  "note": ""
+ },
+ {
+  "group": "A-auth",
+  "test": "no credential: POST /api/git/review/commit",
+  "expected": "401|403",
+  "got": "401",
+  "verdict": "PASS",
+  "note": ""
+ },
+ {
+  "group": "A-auth",
+  "test": "no credential: POST /api/git/review/push",
+  "expected": "401|403",
+  "got": "401",
+  "verdict": "PASS",
+  "note": ""
+ },
+ {
+  "group": "A-auth",
+  "test": "no credential: POST /api/mcp/servers",
+  "expected": "401|403",
+  "got": "401",
+  "verdict": "PASS",
+  "note": ""
+ },
+ {
+  "group": "A-auth",
+  "test": "no credential: PUT /api/tools/terminal/backend",
+  "expected": "401|403",
+  "got": "401",
+  "verdict": "PASS",
+  "note": ""
+ },
+ {
+  "group": "A-auth",
+  "test": "no credential: POST /api/files/upload",
+  "expected": "401|403",
+  "got": "401",
+  "verdict": "PASS",
+  "note": ""
+ },
+ {
+  "group": "A-auth",
+  "test": "wrong token: GET /api/sessions",
+  "expected": "401|403",
+  "got": "401",
+  "verdict": "PASS",
+  "note": ""
+ },
+ {
+  "group": "B-ok",
+  "test": "valid token + Host 127.0.0.1:19120: GET /api/sessions",
+  "expected": "200",
+  "got": "200",
+  "verdict": "PASS",
+  "note": ""
+ },
+ {
+  "group": "B-ok",
+  "test": "valid token + Host localhost:19120",
+  "expected": "200",
+  "got": "200",
+  "verdict": "PASS",
+  "note": ""
+ },
+ {
+  "group": "C-host",
+  "test": "HTTP valid token + Host 'evil.test:19120'",
+  "expected": "400|403|421",
+  "got": "400",
+  "verdict": "PASS",
+  "note": "DNS rebinding"
+ },
+ {
+  "group": "C-host",
+  "test": "HTTP NO token   + Host 'evil.test:19120'",
+  "expected": "400|401|403|421",
+  "got": "401",
+  "verdict": "PASS",
+  "note": "DNS rebinding"
+ },
+ {
+  "group": "C-host",
+  "test": "HTTP valid token + Host 'hermes.localhost:19120'",
+  "expected": "400|403|421|200",
+  "got": "400",
+  "verdict": "PASS",
+  "note": "intended fused host: needs public_url"
+ },
+ {
+  "group": "C-host",
+  "test": "HTTP NO token   + Host 'hermes.localhost:19120'",
+  "expected": "400|401|403|421",
+  "got": "401",
+  "verdict": "PASS",
+  "note": "intended fused host: needs public_url"
+ },
+ {
+  "group": "C-host",
+  "test": "HTTP valid token + Host 'hermes.localhost:7000'",
+  "expected": "400|403|421|200",
+  "got": "400",
+  "verdict": "PASS",
+  "note": "fused host as the browser sends it"
+ },
+ {
+  "group": "C-host",
+  "test": "HTTP NO token   + Host 'hermes.localhost:7000'",
+  "expected": "400|401|403|421",
+  "got": "401",
+  "verdict": "PASS",
+  "note": "fused host as the browser sends it"
+ },
+ {
+  "group": "C-host",
+  "test": "HTTP valid token + Host '127.0.0.1.evil.test:19120'",
+  "expected": "400|403|421",
+  "got": "400",
+  "verdict": "PASS",
+  "note": "suffix trick"
+ },
+ {
+  "group": "C-host",
+  "test": "HTTP NO token   + Host '127.0.0.1.evil.test:19120'",
+  "expected": "400|401|403|421",
+  "got": "401",
+  "verdict": "PASS",
+  "note": "suffix trick"
+ },
+ {
+  "group": "C-host",
+  "test": "HTTP valid token + Host 'evil.test'",
+  "expected": "400|403|421",
+  "got": "400",
+  "verdict": "PASS",
+  "note": "no port"
+ },
+ {
+  "group": "C-host",
+  "test": "HTTP NO token   + Host 'evil.test'",
+  "expected": "400|401|403|421",
+  "got": "401",
+  "verdict": "PASS",
+  "note": "no port"
+ },
+ {
+  "group": "C-host",
+  "test": "HTTP valid token + Host ''",
+  "expected": "400|403|421|200",
+  "got": "200",
+  "verdict": "PASS",
+  "note": "empty host"
+ },
+ {
+  "group": "D-orig",
+  "test": "HTTP GET valid token + Origin http://evil.example",
+  "expected": "200|400|403",
+  "got": "200",
+  "verdict": "PASS",
+  "note": ""
+ },
+ {
+  "group": "D-orig",
+  "test": "HTTP POST (empty body) valid token + Origin http://evil.example",
+  "expected": "400|403|422",
+  "got": "422",
+  "verdict": "PASS",
+  "note": "a 400/422 means it reached the handler"
+ },
+ {
+  "group": "D-orig",
+  "test": "HTTP GET valid token + Origin null",
+  "expected": "200|400|403",
+  "got": "200",
+  "verdict": "PASS",
+  "note": ""
+ },
+ {
+  "group": "D-orig",
+  "test": "HTTP POST (empty body) valid token + Origin null",
+  "expected": "400|403|422",
+  "got": "422",
+  "verdict": "PASS",
+  "note": "a 400/422 means it reached the handler"
+ },
+ {
+  "group": "D-orig",
+  "test": "HTTP GET valid token + Origin http://127.0.0.1:19120",
+  "expected": "200|400|403",
+  "got": "200",
+  "verdict": "PASS",
+  "note": ""
+ },
+ {
+  "group": "D-orig",
+  "test": "HTTP POST (empty body) valid token + Origin http://127.0.0.1:19120",
+  "expected": "400|403|422",
+  "got": "422",
+  "verdict": "PASS",
+  "note": "a 400/422 means it reached the handler"
+ },
+ {
+  "group": "D-orig",
+  "test": "HTTP GET valid token + Origin http://localhost:19120",
+  "expected": "200|400|403",
+  "got": "200",
+  "verdict": "PASS",
+  "note": ""
+ },
+ {
+  "group": "D-orig",
+  "test": "HTTP POST (empty body) valid token + Origin http://localhost:19120",
+  "expected": "400|403|422",
+  "got": "422",
+  "verdict": "PASS",
+  "note": "a 400/422 means it reached the handler"
+ },
+ {
+  "group": "D-orig",
+  "test": "HTTP GET valid token + Origin http://hermes.localhost:7000",
+  "expected": "200|400|403",
+  "got": "200",
+  "verdict": "PASS",
+  "note": ""
+ },
+ {
+  "group": "D-orig",
+  "test": "HTTP POST (empty body) valid token + Origin http://hermes.localhost:7000",
+  "expected": "400|403|422",
+  "got": "422",
+  "verdict": "PASS",
+  "note": "a 400/422 means it reached the handler"
+ },
+ {
+  "group": "D-orig",
+  "test": "CORS preflight from http://evil.example: allow-origin header",
+  "expected": "None",
+  "got": "None",
+  "verdict": "PASS",
+  "note": ""
+ },
+ {
+  "group": "E-ws",
+  "test": "/api/ws no token, no origin",
+  "expected": "refused",
+  "got": "HTTP 403 ",
+  "verdict": "PASS",
+  "note": ""
+ },
+ {
+  "group": "E-ws",
+  "test": "/api/ws no token, Origin evil",
+  "expected": "refused",
+  "got": "HTTP 403 ",
+  "verdict": "PASS",
+  "note": ""
+ },
+ {
+  "group": "E-ws",
+  "test": "/api/ws TOKEN + Origin evil",
+  "expected": "refused",
+  "got": "HTTP 403 ",
+  "verdict": "PASS",
+  "note": ""
+ },
+ {
+  "group": "E-ws",
+  "test": "/api/ws TOKEN + Origin null",
+  "expected": "refused",
+  "got": "OPEN {\"jsonrpc\": \"2.0\", \"method\": \"event\", \"params\": {\"type\": \"gateway.ready\", \"paylo",
+  "verdict": "FAIL",
+  "note": ""
+ },
+ {
+  "group": "E-ws",
+  "test": "/api/ws TOKEN + rebinding Host+Origin evil.test",
+  "expected": "refused",
+  "got": "HTTP 403 ",
+  "verdict": "PASS",
+  "note": ""
+ },
+ {
+  "group": "E-ws",
+  "test": "/api/ws TOKEN + fused origin hermes.localhost:7000",
+  "expected": "info",
+  "got": "HTTP 403 ",
+  "verdict": "INFO",
+  "note": ""
+ },
+ {
+  "group": "E-ws",
+  "test": "/api/ws TOKEN + same-origin 127.0.0.1:19120",
+  "expected": "info",
+  "got": "OPEN {\"jsonrpc\": \"2.0\", \"method\": \"event\", \"params\": {\"type\": \"gateway.ready\", \"paylo",
+  "verdict": "INFO",
+  "note": ""
+ },
+ {
+  "group": "E-ws",
+  "test": "/api/ws TOKEN, no Origin header (non-browser client)",
+  "expected": "info",
+  "got": "OPEN {\"jsonrpc\": \"2.0\", \"method\": \"event\", \"params\": {\"type\": \"gateway.ready\", \"paylo",
+  "verdict": "INFO",
+  "note": ""
+ },
+ {
+  "group": "E-ws",
+  "test": "/api/events no token, no origin",
+  "expected": "refused",
+  "got": "HTTP 403 ",
+  "verdict": "PASS",
+  "note": ""
+ },
+ {
+  "group": "E-ws",
+  "test": "/api/events no token, Origin evil",
+  "expected": "refused",
+  "got": "HTTP 403 ",
+  "verdict": "PASS",
+  "note": ""
+ },
+ {
+  "group": "E-ws",
+  "test": "/api/events TOKEN + Origin evil",
+  "expected": "refused",
+  "got": "HTTP 403 ",
+  "verdict": "PASS",
+  "note": ""
+ },
+ {
+  "group": "E-ws",
+  "test": "/api/events TOKEN + Origin null",
+  "expected": "refused",
+  "got": "HTTP 403 ",
+  "verdict": "PASS",
+  "note": ""
+ },
+ {
+  "group": "E-ws",
+  "test": "/api/events TOKEN + rebinding Host+Origin evil.test",
+  "expected": "refused",
+  "got": "HTTP 403 ",
+  "verdict": "PASS",
+  "note": ""
+ },
+ {
+  "group": "E-ws",
+  "test": "/api/events TOKEN + fused origin hermes.localhost:7000",
+  "expected": "info",
+  "got": "HTTP 403 ",
+  "verdict": "INFO",
+  "note": ""
+ },
+ {
+  "group": "E-ws",
+  "test": "/api/events TOKEN + same-origin 127.0.0.1:19120",
+  "expected": "info",
+  "got": "HTTP 403 ",
+  "verdict": "INFO",
+  "note": ""
+ },
+ {
+  "group": "E-ws",
+  "test": "/api/events TOKEN, no Origin header (non-browser client)",
+  "expected": "info",
+  "got": "HTTP 403 ",
+  "verdict": "INFO",
+  "note": ""
+ },
+ {
+  "group": "E-ws",
+  "test": "/api/pub no token, no origin",
+  "expected": "refused",
+  "got": "HTTP 403 ",
+  "verdict": "PASS",
+  "note": ""
+ },
+ {
+  "group": "E-ws",
+  "test": "/api/pub no token, Origin evil",
+  "expected": "refused",
+  "got": "HTTP 403 ",
+  "verdict": "PASS",
+  "note": ""
+ },
+ {
+  "group": "E-ws",
+  "test": "/api/pub TOKEN + Origin evil",
+  "expected": "refused",
+  "got": "HTTP 403 ",
+  "verdict": "PASS",
+  "note": ""
+ },
+ {
+  "group": "E-ws",
+  "test": "/api/pub TOKEN + Origin null",
+  "expected": "refused",
+  "got": "HTTP 403 ",
+  "verdict": "PASS",
+  "note": ""
+ },
+ {
+  "group": "E-ws",
+  "test": "/api/pub TOKEN + rebinding Host+Origin evil.test",
+  "expected": "refused",
+  "got": "HTTP 403 ",
+  "verdict": "PASS",
+  "note": ""
+ },
+ {
+  "group": "E-ws",
+  "test": "/api/pub TOKEN + fused origin hermes.localhost:7000",
+  "expected": "info",
+  "got": "HTTP 403 ",
+  "verdict": "INFO",
+  "note": ""
+ },
+ {
+  "group": "E-ws",
+  "test": "/api/pub TOKEN + same-origin 127.0.0.1:19120",
+  "expected": "info",
+  "got": "HTTP 403 ",
+  "verdict": "INFO",
+  "note": ""
+ },
+ {
+  "group": "E-ws",
+  "test": "/api/pub TOKEN, no Origin header (non-browser client)",
+  "expected": "info",
+  "got": "HTTP 403 ",
+  "verdict": "INFO",
+  "note": ""
+ },
+ {
+  "group": "E-ws",
+  "test": "/api/pty no token, no origin",
+  "expected": "refused",
+  "got": "HTTP 403 ",
+  "verdict": "PASS",
+  "note": ""
+ },
+ {
+  "group": "E-ws",
+  "test": "/api/pty no token, Origin evil",
+  "expected": "refused",
+  "got": "HTTP 403 ",
+  "verdict": "PASS",
+  "note": ""
+ },
+ {
+  "group": "E-ws",
+  "test": "/api/pty TOKEN + Origin evil",
+  "expected": "refused",
+  "got": "HTTP 403 ",
+  "verdict": "PASS",
+  "note": ""
+ },
+ {
+  "group": "E-ws",
+  "test": "/api/pty TOKEN + Origin null",
+  "expected": "refused",
+  "got": "OPEN quiet",
+  "verdict": "FAIL",
+  "note": ""
+ },
+ {
+  "group": "E-ws",
+  "test": "/api/pty TOKEN + rebinding Host+Origin evil.test",
+  "expected": "refused",
+  "got": "HTTP 403 ",
+  "verdict": "PASS",
+  "note": ""
+ },
+ {
+  "group": "E-ws",
+  "test": "/api/pty TOKEN + fused origin hermes.localhost:7000",
+  "expected": "info",
+  "got": "HTTP 403 ",
+  "verdict": "INFO",
+  "note": ""
+ },
+ {
+  "group": "E-ws",
+  "test": "/api/pty TOKEN + same-origin 127.0.0.1:19120",
+  "expected": "info",
+  "got": "OPEN quiet",
+  "verdict": "INFO",
+  "note": ""
+ },
+ {
+  "group": "E-ws",
+  "test": "/api/pty TOKEN, no Origin header (non-browser client)",
+  "expected": "info",
+  "got": "OPEN quiet",
+  "verdict": "INFO",
+  "note": ""
+ },
+ {
+  "group": "E-ws",
+  "test": "/api/host-terminal no token, no origin",
+  "expected": "refused",
+  "got": "HTTP 403 ",
+  "verdict": "PASS",
+  "note": ""
+ },
+ {
+  "group": "E-ws",
+  "test": "/api/host-terminal no token, Origin evil",
+  "expected": "refused",
+  "got": "HTTP 403 ",
+  "verdict": "PASS",
+  "note": ""
+ },
+ {
+  "group": "E-ws",
+  "test": "/api/host-terminal TOKEN + Origin evil",
+  "expected": "refused",
+  "got": "HTTP 403 ",
+  "verdict": "PASS",
+  "note": ""
+ },
+ {
+  "group": "E-ws",
+  "test": "/api/host-terminal TOKEN + Origin null",
+  "expected": "refused",
+  "got": "HTTP 403 ",
+  "verdict": "PASS",
+  "note": ""
+ },
+ {
+  "group": "E-ws",
+  "test": "/api/host-terminal TOKEN + rebinding Host+Origin evil.test",
+  "expected": "refused",
+  "got": "HTTP 403 ",
+  "verdict": "PASS",
+  "note": ""
+ },
+ {
+  "group": "E-ws",
+  "test": "/api/host-terminal TOKEN + fused origin hermes.localhost:7000",
+  "expected": "info",
+  "got": "HTTP 403 ",
+  "verdict": "INFO",
+  "note": ""
+ },
+ {
+  "group": "E-ws",
+  "test": "/api/host-terminal TOKEN + same-origin 127.0.0.1:19120",
+  "expected": "info",
+  "got": "HTTP 403 ",
+  "verdict": "INFO",
+  "note": ""
+ },
+ {
+  "group": "E-ws",
+  "test": "/api/host-terminal TOKEN, no Origin header (non-browser client)",
+  "expected": "info",
+  "got": "HTTP 403 ",
+  "verdict": "INFO",
+  "note": ""
+ },
+ {
+  "group": "E-ws",
+  "test": "/api/console no token, no origin",
+  "expected": "refused",
+  "got": "HTTP 403 ",
+  "verdict": "PASS",
+  "note": ""
+ },
+ {
+  "group": "E-ws",
+  "test": "/api/console no token, Origin evil",
+  "expected": "refused",
+  "got": "HTTP 403 ",
+  "verdict": "PASS",
+  "note": ""
+ },
+ {
+  "group": "E-ws",
+  "test": "/api/console TOKEN + Origin evil",
+  "expected": "refused",
+  "got": "HTTP 403 ",
+  "verdict": "PASS",
+  "note": ""
+ },
+ {
+  "group": "E-ws",
+  "test": "/api/console TOKEN + Origin null",
+  "expected": "refused",
+  "got": "OPEN {\"type\":\"ready\",\"profile\":\"current\",\"prompt\":\"hermes> \"}",
+  "verdict": "FAIL",
+  "note": ""
+ },
+ {
+  "group": "E-ws",
+  "test": "/api/console TOKEN + rebinding Host+Origin evil.test",
+  "expected": "refused",
+  "got": "HTTP 403 ",
+  "verdict": "PASS",
+  "note": ""
+ },
+ {
+  "group": "E-ws",
+  "test": "/api/console TOKEN + fused origin hermes.localhost:7000",
+  "expected": "info",
+  "got": "HTTP 403 ",
+  "verdict": "INFO",
+  "note": ""
+ },
+ {
+  "group": "E-ws",
+  "test": "/api/console TOKEN + same-origin 127.0.0.1:19120",
+  "expected": "info",
+  "got": "OPEN {\"type\":\"ready\",\"profile\":\"current\",\"prompt\":\"hermes> \"}",
+  "verdict": "INFO",
+  "note": ""
+ },
+ {
+  "group": "E-ws",
+  "test": "/api/console TOKEN, no Origin header (non-browser client)",
+  "expected": "info",
+  "got": "OPEN {\"type\":\"ready\",\"profile\":\"current\",\"prompt\":\"hermes> \"}",
+  "verdict": "INFO",
+  "note": ""
+ }
+]

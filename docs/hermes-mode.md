@@ -1,6 +1,6 @@
 # Hermes Mode — Windows component integration
 
-**Status: development draft, not a production release.** This branch preserves the existing Windows-fork base and does not include the separate Trusted Workspaces implementation. Do not merge it into a live installation yet.
+**Status: development draft, not a production release.** This branch applies the reviewed Trusted Workspaces patch to the pinned Hermes WebUI (see `docs/trusted-workspaces.md`), and it adds service controls, a Hermes-aware proxy and full backup/restore. The Hermes WebUI is being replaced by the official Hermes Desktop/Webapp (`docs/hermes-desktop-migration-inventory.md`); WebUI-specific work is frozen. Do not treat the Trusted Workspaces dialog as a security boundary: it governs file tools only (`docs/hermes-access-model.md`).
 
 ## Architecture and implemented scope
 

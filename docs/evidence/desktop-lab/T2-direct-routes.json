@@ -1,0 +1,121 @@
+[
+ {
+  "test": "fs/write-text OUTSIDE the safe root (create)",
+  "agent_guard_would": "REFUSE (not under HERMES_WRITE_SAFE_ROOT)",
+  "direct_route_outcome": "BYPASS",
+  "evidence": "http 200",
+  "note": "{'ok': True, 'path': 'F:\\\\Odysseus-Backups\\\\desktop-lab\\\\wor"
+ },
+ {
+  "test": "fs/write-text OUTSIDE the safe root (overwrite)",
+  "agent_guard_would": "REFUSE",
+  "direct_route_outcome": "BYPASS",
+  "evidence": "http 200",
+  "note": ""
+ },
+ {
+  "test": "fs/write-text onto a NEVER-ALLOW path",
+  "agent_guard_would": "REFUSE (never-allow list)",
+  "direct_route_outcome": "BYPASS",
+  "evidence": "http 200",
+  "note": ""
+ },
+ {
+  "test": "fs/write-text onto the Hermes config.yaml (security settings)",
+  "agent_guard_would": "REFUSE (outside safe root / protected)",
+  "direct_route_outcome": "BYPASS",
+  "evidence": "http 200",
+  "note": "approvals.mode could be set to off"
+ },
+ {
+  "test": "fs/write-text creating a file in the Hermes plugins folder",
+  "agent_guard_would": "REFUSE",
+  "direct_route_outcome": "BYPASS",
+  "evidence": "http 200",
+  "note": ""
+ },
+ {
+  "test": "files/mkdir outside the safe root",
+  "agent_guard_would": "REFUSE",
+  "direct_route_outcome": "BYPASS",
+  "evidence": "http 200",
+  "note": "{'ok': True, 'entry': {'name': 'made-by-route', 'p"
+ },
+ {
+  "test": "DELETE /api/files recursive on a folder",
+  "agent_guard_would": "ASK/BLOCK (recursive delete)",
+  "direct_route_outcome": "BYPASS",
+  "evidence": "http 200",
+  "note": "{'ok': True, 'path': 'F:\\\\Odysseus-Backups\\\\desktop-lab\\\\wor"
+ },
+ {
+  "test": "DELETE /api/files outside the safe root",
+  "agent_guard_would": "REFUSE",
+  "direct_route_outcome": "BYPASS",
+  "evidence": "http 200",
+  "note": ""
+ },
+ {
+  "test": "fs/read-text of HOME .env",
+  "agent_guard_would": "REFUSE (credential file)",
+  "direct_route_outcome": "refused 403",
+  "evidence": "http 403",
+  "note": ""
+ },
+ {
+  "test": "fs/read-text of HOME auth.json",
+  "agent_guard_would": "REFUSE (credential file)",
+  "direct_route_outcome": "refused 403",
+  "evidence": "http 403",
+  "note": ""
+ },
+ {
+  "test": "fs/read-text of webapp session-token file",
+  "agent_guard_would": "REFUSE (credential file)",
+  "direct_route_outcome": "LEAKS",
+  "evidence": "http 200",
+  "note": ""
+ },
+ {
+  "test": "git/review/commit with push=true (remote updated)",
+  "agent_guard_would": "ASK (git push is not on the read-only list)",
+  "direct_route_outcome": "refused 400",
+  "evidence": "http 400; bare repo (empty) -> (empty)",
+  "note": "{'detail': '0 [main] sh (22272) C:\\\\Program Files\\\\Git\\\\usr\\"
+ },
+ {
+  "test": "POST /api/mcp/servers with an arbitrary command",
+  "agent_guard_would": "n/a (config change, no approval gate)",
+  "direct_route_outcome": "ACCEPTED",
+  "evidence": "http 200",
+  "note": "{'name': 'labmarker', 'transport': 'stdio', 'url': None, 'command': 'C"
+ },
+ {
+  "test": "POST /api/mcp/servers/labmarker/test spawns that command",
+  "agent_guard_would": "ASK/BLOCK for shell-like execution",
+  "direct_route_outcome": "EXECUTED",
+  "evidence": "http 200",
+  "note": "{'ok': False, 'error': 'Connection closed', 'tools': []}"
+ },
+ {
+  "test": "POST /api/mcp/servers command: cmd.exe /c ...",
+  "agent_guard_would": "n/a",
+  "direct_route_outcome": "ACCEPTED",
+  "evidence": "http 200",
+  "note": "{'name': 'labcmdexe', 'transport': 'stdio', 'url': None, 'command': 'c"
+ },
+ {
+  "test": "POST /api/mcp/servers command: powershell -Command ...",
+  "agent_guard_would": "n/a",
+  "direct_route_outcome": "ACCEPTED",
+  "evidence": "http 200",
+  "note": "{'name': 'labpowers', 'transport': 'stdio', 'url': None, 'command': 'p"
+ },
+ {
+  "test": "POST /api/mcp/servers command: python -c ...",
+  "agent_guard_would": "n/a",
+  "direct_route_outcome": "ACCEPTED",
+  "evidence": "http 200",
+  "note": "{'name': 'labpython', 'transport': 'stdio', 'url': None, 'command': 'C"
+ }
+]

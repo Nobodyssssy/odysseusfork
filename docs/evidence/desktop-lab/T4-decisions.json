@@ -1,0 +1,153 @@
+[
+ {
+  "scenario": "S6_terminal_git_push",
+  "asked": [
+   {
+    "choices": [
+     "once",
+     "deny",
+     "session",
+     "always"
+    ],
+    "description": "[Odysseus ask-policy] terminal: git -C \"F:/Odysseus-Backups/desktop-lab/repos/work\" push origin HEAD  |  Comma",
+    "answer_reply": "{'status': 'resolved', 'prompt_id': '653dcee5be424632923b4b8814dccede'"
+   }
+  ],
+  "asked_n": 1,
+  "effect_happened": false,
+  "result": "{\"error\": \"BLOCKED: Action denied by user. The user has NOT consented to this action. Do NOT retry it, do NOT rephrase it, and do NOT attempt the same outcome via a different path.\"}",
+  "seconds": 1.8,
+  "event_types": [
+   "agent.step",
+   "approval.request",
+   "approval.settled",
+   "message.complete",
+   "message.delta",
+   "message.start",
+   "platforms.changed",
+   "session.info",
+   "session.usage",
+   "sessions.changed",
+   "thinking.delta",
+   "tool.generating"
+  ],
+  "submit": "{'admission_id': '715d32c866bd4495832acca7d27a7ca0', 'ref': {'profile_id': 'F:\\\\",
+  "answered": "deny"
+ },
+ {
+  "scenario": "S5_terminal_powershell_write",
+  "asked": [
+   {
+    "choices": [
+     "once",
+     "deny",
+     "session",
+     "always"
+    ],
+    "description": "[Odysseus ask-policy] terminal: powershell -NoProfile -Command \"Set-Content -Path 'F:\\Odysseus-Backups\\desktop",
+    "answer_reply": "{'status': 'resolved', 'prompt_id': 'f2c695928fe14d3facb685270adccb22'"
+   },
+   {
+    "choices": [
+     "once",
+     "deny",
+     "session",
+     "always"
+    ],
+    "description": "script execution via -e/-c flag",
+    "answer_reply": "{'status': 'resolved', 'prompt_id': '48784b273215426491ccf443a0648789'"
+   }
+  ],
+  "asked_n": 2,
+  "effect_happened": false,
+  "result": "{\"output\": \"\", \"exit_code\": -1, \"error\": \"Command execution failed: RuntimeError: No shell found. Hermes needs bash (Git for Windows on Windows). Run `hermes pm install` or reinstall the bundle.\"}",
+  "seconds": 17.4,
+  "event_types": [
+   "agent.step",
+   "approval.request",
+   "approval.settled",
+   "message.complete",
+   "message.delta",
+   "message.start",
+   "platforms.changed",
+   "session.info",
+   "session.usage",
+   "sessions.changed",
+   "thinking.delta",
+   "tool.complete",
+   "tool.generating",
+   "tool.start"
+  ],
+  "submit": "{'admission_id': 'cd4e59baeb754e7fbdc7a5d21b5a9ca8', 'ref': {'profile_id': 'F:\\\\",
+  "answered": "once"
+ },
+ {
+  "scenario": "S7_execute_code_write_outside",
+  "asked": [
+   {
+    "choices": [
+     "once",
+     "deny",
+     "session",
+     "always"
+    ],
+    "description": "[Odysseus ask-policy] execute_code: 92 characters of code: open(r'F:\\Odysseus-Backups\\desktop-lab\\work\\outside",
+    "answer_reply": "{'status': 'resolved', 'prompt_id': '37966e6ba2d645c78d5f03041b3f39d0'"
+   }
+  ],
+  "asked_n": 1,
+  "effect_happened": false,
+  "result": "{\"error\": \"BLOCKED: Action denied by user. The user has NOT consented to this action. Do NOT retry it, do NOT rephrase it, and do NOT attempt the same outcome via a different path.\"}",
+  "seconds": 2.1,
+  "event_types": [
+   "agent.step",
+   "approval.request",
+   "approval.settled",
+   "message.complete",
+   "message.delta",
+   "message.start",
+   "session.info",
+   "session.usage",
+   "sessions.changed",
+   "thinking.delta",
+   "tool.generating"
+  ],
+  "submit": "{'admission_id': 'fa58f909c59b408582ff70132ba7be95', 'ref': {'profile_id': 'F:\\\\",
+  "answered": "deny"
+ },
+ {
+  "scenario": "S9_subagent_delegate",
+  "asked": [
+   {
+    "choices": [
+     "once",
+     "deny",
+     "session",
+     "always"
+    ],
+    "description": "[Odysseus ask-policy] delegate_task: {\"goal\": \"SCENARIO:T01 do exactly what the scenario says\"}  |  Commands a",
+    "answer_reply": "{'status': 'resolved', 'prompt_id': '228a3f966699407c895537e6f08ae552'"
+   }
+  ],
+  "asked_n": 1,
+  "effect_happened": false,
+  "result": "{\"error\": \"BLOCKED: Action denied by user. The user has NOT consented to this action. Do NOT retry it, do NOT rephrase it, and do NOT attempt the same outcome via a different path.\"}",
+  "seconds": 2.0,
+  "event_types": [
+   "agent.step",
+   "approval.request",
+   "approval.settled",
+   "message.complete",
+   "message.delta",
+   "message.start",
+   "platforms.changed",
+   "session.info",
+   "session.usage",
+   "sessions.changed",
+   "thinking.delta",
+   "tool.generating"
+  ],
+  "submit": "{'admission_id': '1bc21cf65a314692a33ad3e5c514663f', 'ref': {'profile_id': 'F:\\\\",
+  "answered": "deny"
+ }
+]

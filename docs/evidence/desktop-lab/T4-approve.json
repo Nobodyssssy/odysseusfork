@@ -1,0 +1,76 @@
+[
+ {
+  "scenario": "S7_execute_code_write_outside",
+  "asked": [
+   {
+    "choices": [
+     "once",
+     "deny",
+     "session",
+     "always"
+    ],
+    "description": "[Odysseus ask-policy] execute_code: 92 characters of code: open(r'F:\\Odysseus-Backups\\desktop-lab\\work\\outside",
+    "answer_reply": "{'status': 'resolved', 'prompt_id': '01768856ca0643209e588b1bd450bf2a'"
+   }
+  ],
+  "asked_n": 1,
+  "effect_happened": true,
+  "result": "{\"status\": \"success\", \"output\": \"done\\n\", \"exit_code\": 0, \"tool_calls_made\": 0, \"duration_seconds\": 0.16, \"kernel\": {\"mode\": \"session\", \"reused\": false, \"execution_count\": 1, \"state_reset\": false}, \"stdout_truncated\": false, \"stdout_bytes_captured\": 5, \"stdout",
+  "seconds": 2.3,
+  "event_types": [
+   "agent.step",
+   "approval.request",
+   "approval.settled",
+   "message.complete",
+   "message.delta",
+   "message.start",
+   "platforms.changed",
+   "session.info",
+   "session.usage",
+   "sessions.changed",
+   "thinking.delta",
+   "tool.complete",
+   "tool.generating",
+   "tool.start"
+  ],
+  "submit": "{'admission_id': '0a54475d25144f08843386f148077ae7', 'ref': {'profile_id': 'F:\\\\",
+  "answered": "once"
+ },
+ {
+  "scenario": "S9_subagent_delegate",
+  "asked": [
+   {
+    "choices": [
+     "once",
+     "deny",
+     "session",
+     "always"
+    ],
+    "description": "[Odysseus ask-policy] delegate_task: {\"goal\": \"SCENARIO:T01 do exactly what the scenario says\"}  |  Commands a",
+    "answer_reply": "{'status': 'resolved', 'prompt_id': '67c6aca319a349b6ae21c8d77d99c1e0'"
+   }
+  ],
+  "asked_n": 1,
+  "effect_happened": false,
+  "result": "{\"status\": \"dispatched\", \"mode\": \"background\", \"count\": 1, \"delegation_id\": \"deleg_60409329\", \"goals\": [\"SCENARIO:T01 do exactly what the scenario says\"], \"note\": \"Subagent is running in the background; its full result re-enters the conversation as a new messa",
+  "seconds": 2.0,
+  "event_types": [
+   "agent.step",
+   "approval.request",
+   "approval.settled",
+   "message.complete",
+   "message.delta",
+   "message.start",
+   "session.info",
+   "session.usage",
+   "sessions.changed",
+   "subagent.complete",
+   "subagent.spawn_requested",
+   "subagent.start",
+   "subagent.thinking",
+   "thinking.delta"
+  ],
+  "submit": "{'admission_id': '6b35ccbbef714b4cb4b1e42da3c8b9aa', 'ref': {'profile_id': 'F:\\\\",
+  "answered": "once"
+ }
+]

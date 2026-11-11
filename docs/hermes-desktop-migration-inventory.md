@@ -80,3 +80,48 @@ Rollback: keep the old WebUI checkout, pin and patch unchanged until the Desktop
 ## 9. Missing Claude Code / Codex features worth adding later
 
 Not verified against the Desktop; candidates only: per-command approval with "always for this exact command prefix"; session-scoped permission modes shown in the UI; plan mode; a visible diff before accepting each file edit; checkpoints/rewind; hooks; project rules file; sandboxed command execution; per-tool allow/deny rules in project settings.
+
+## 10. Decisions recorded (user, 2026-11-11) and what the lab changed
+
+- Fork strategy: **Option A first** (official Desktop/Webapp from the pinned agent checkout, Odysseus integration via plugins, extensions and APIs). Long term, a fork of the **whole** `NousResearch/hermes-agent` repository, created only when source-level customization is needed, with a clean upstream relationship.
+- **Browser Webapp first, native Electron second.** Final product: browser at `localhost:7000` with Personal (Odysseus) and Projects (Hermes), a unified Windows desktop app with the same two modes and the same backend data, Linux afterwards. Do not discard Electron.
+- Host/Origin: no more patches to the old WebUI; complete the reusable **Odysseus-side** Host/Origin protections including WebSocket origin validation; document the remaining direct-8787 rebinding risk; the password is temporary defense in depth. The new gateway/Webapp must pass HTTP and WebSocket rebinding tests before production activation.
+- Disposable tests only; no production changes, no live plugin install, no restarts, no push, no deploy without separate approval.
+
+## 11. Prototype findings that change the plan (see `desktop-lab-results.md`, `ask-policy-vs-upstream.md`)
+
+1. **The official Webapp builds and runs in isolation from the pinned checkout** (Node >= 26 and pnpm from the Hermes tools folder) and signs in through a one-use launch link.
+2. **The Odysseus proxy cannot carry the Webapp today.** The Odysseus venv has neither `websockets` nor `wsproto`, so a WebSocket upgrade to `hermes.localhost:7000` is answered `400 Invalid HTTP request received` by uvicorn (measured live, handshake only, no credentials) and the proxy's own WebSocket branch is unreachable. Needed: a WebSocket library, a relay that preserves Host/Origin handling, and the same loopback-peer / no-forwarded-header / exact-Host rules; reject `Origin: null`.
+3. **`webapp.public_url` is required for the fused address**: the gateway rejects `hermes.localhost:<port>` (HTTP 400, WebSocket 403) otherwise. Setting it also engages the dashboard sign-in gate. Not yet tested.
+4. **Upstream protects more than assumed** (Hermes state, credentials, config, venv) and **less than assumed** for `plugins/`, `execute_code`, sub-agents, `git push` and MCP.
+5. **Direct Webapp routes bypass the agent guard** (fs write/delete, Git, MCP server commands); only OS-level isolation or a source change addresses that.
+6. Odysseus pieces reused unmodified: component manager and pins (add a Desktop/Webapp build step), Services controls (re-point the active-run probe), full backup (add `webapp\` state and Desktop plugin folders), proxy cookie fix, ask-policy plugin (with the changes in `ask-policy-vs-upstream.md` section 3).
+
+## 12. Which features need our own Hermes fork (not a plugin or extension)
+
+Candidates, in order of how likely they are to need a fork rather than an upstream PR:
+
+- Guard the direct fs/Git/MCP routes with the write guard and the never-allow list (source change in `hermes_cli/web_routers/*`).
+- Add `plugins/` and `hooks/` to `_HERMES_PROTECTED_SUBPATHS` (tiny; upstream PR first).
+- Reject `Origin: null` and empty Host on gateway WebSockets/HTTP (tiny; upstream PR first).
+- A supported hook for path vetoes, replacing our rebind of a private function.
+- Odysseus Personal/Projects mode switching inside the Desktop shell (a Desktop plugin if the plugin API allows; otherwise a fork).
+- Claude Code / Codex features (section 9 of this document): plan mode, checkpoints/rewind, per-command prefix rules, project instruction files and review UI need a feature-by-feature comparison against the Desktop first; much of it may already exist upstream (Git review pane, worktrees, checkpoints).
+
+## 13. Proposed migration sequence
+
+0. **Done:** isolated Webapp prototype and essential tests (no production change).
+1. Odysseus-side code on `feature/phase1-permissions`: WebSocket-capable proxy (add `websockets`), Host/Origin/`Origin: null` rules, unit tests plus the lab matrix. No production change.
+2. Lab: a second Odysseus instance on spare ports in front of the lab gateway with `webapp.public_url` set; run T1 through it, including HTTP and WebSocket rebinding via `hermes.localhost`.
+3. Plugin changes: neutral never-allow store seeded with `plugins\`, `hooks\`, Odysseus `.env` and `data\`; remove double prompts; decide on the `always` choice; extend tests (MCP through the Webapp).
+4. Component manager: pin and build the Webapp from the agent checkout (Node 26 + pnpm from the Hermes tools folder); launcher owns `webapp.enabled`, `webapp.host: 127.0.0.1`, `webapp.public_url`, `approvals.mode: manual` and `HERMES_WRITE_SAFE_ROOT` for the Hermes child.
+5. **Needs your approval:** production parallel run, Webapp enabled on loopback 9120 beside the old WebUI, ask-policy plugin installed, approvals set to manual, no proxy cutover.
+6. **Needs your approval:** proxy cutover behind a flag (`hermes.localhost:7000` to 9120), old WebUI still running unproxied.
+7. Retire the old WebUI after a stable period; keep its pin and patch in history.
+
+## 14. Rollback
+
+- Odysseus: flip the proxy upstream flag back to 8787; `webapp.enabled: false`.
+- Hermes: restore `config.yaml` from `F:\Odysseus-Backups\config-backups\` (a backup exists from before the allowlist cleanup); disable the plugin by removing `odysseus-ask-policy` from `plugins.enabled` (reverts to upstream behaviour: shown repeatedly in the lab).
+- Data: the verified snapshot `F:\Odysseus-Backups\snapshot-20261111-130449-db3827` and `scripts/odysseus-backup.py restore` (dry run first; an isolated real restore is still to be rehearsed).
+- The old WebUI checkout, pin and reviewed patch stay untouched until the rollback has been rehearsed in the lab.
