@@ -161,10 +161,24 @@ async function launchProjects() {
   const { response, result } = await post(`${endpoint}/projects/launch`, 30000);
   if (!response.ok || typeof result.url !== 'string') throw new Error(result.detail || 'Projects could not be opened');
   const url = new URL(result.url);
-  if (url.protocol !== 'http:' || url.hostname !== 'hermes.localhost' || url.port !== location.port || url.username || url.password) {
+  const ticketed = url.pathname === '/__odysseus/enter' && url.search.startsWith('?ticket=') && !url.hash;
+  if (url.protocol !== 'http:' || url.hostname !== 'hermes.localhost' || url.port !== location.port || url.username || url.password
+      || (!ticketed && url.pathname === '/__odysseus/enter')) {
     throw new Error('Projects returned an unexpected address; nothing was opened');
   }
   return url.href;
+}
+
+function openProjects(href) {
+  // Odysseus sends Referrer-Policy: no-referrer on every page. The grant exchange needs to know the navigation came from this origin, so this
+  // one link opts in to sending the origin (never the path) and only to the page it points at.
+  const link = document.createElement('a');
+  link.href = href;
+  link.referrerPolicy = 'origin';
+  link.rel = 'noopener';
+  document.body.append(link);
+  link.click();
+  link.remove();
 }
 
 function hermesURL(value) {
@@ -246,7 +260,8 @@ async function initialize() {
       if (status.state !== 'ready') throw new Error('Hermes is not ready yet. Stay here and try again; no process was stopped.');
       await assertCanLeave();
       await saveChatState();
-      location.assign(gateway ? await launchProjects() : destination(status).href);
+      if (gateway) openProjects(await launchProjects());
+      else location.assign(destination(status).href);
     } catch (error) {
       message.textContent = error.message;
       selector.value = 'odysseus';

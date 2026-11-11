@@ -1,0 +1,140 @@
+[
+ {
+  "check": "A  HTTP public route",
+  "got": "401 GATE-DENIED",
+  "expect": "401 GATE-DENIED",
+  "ok": "PASS"
+ },
+ {
+  "check": "A  HTTP protected route with a VALID Hermes bearer token",
+  "got": "401 GATE-DENIED",
+  "expect": "401 GATE-DENIED",
+  "ok": "PASS"
+ },
+ {
+  "check": "A  POST with a valid bearer",
+  "got": "401 GATE-DENIED",
+  "expect": "401 GATE-DENIED",
+  "ok": "PASS"
+ },
+ {
+  "check": "A  cannot mint a WebSocket ticket",
+  "got": "401 GATE-DENIED",
+  "expect": "401 GATE-DENIED",
+  "ok": "PASS"
+ },
+ {
+  "check": "A  WebSocket reconnect attempt 1 (junk ticket)",
+  "got": "401 GATE-DENIED",
+  "expect": "401 GATE-DENIED",
+  "ok": "PASS"
+ },
+ {
+  "check": "A  WebSocket reconnect attempt 2 (junk ticket)",
+  "got": "401 GATE-DENIED",
+  "expect": "401 GATE-DENIED",
+  "ok": "PASS"
+ },
+ {
+  "check": "A  WebSocket reconnect attempt 3 (junk ticket)",
+  "got": "401 GATE-DENIED",
+  "expect": "401 GATE-DENIED",
+  "ok": "PASS"
+ },
+ {
+  "check": "(control) B  WebSocket with a junk ticket is refused by the GATEWAY, not the gate",
+  "got": "403 refused-by-gateway",
+  "expect": "refused-by-gateway",
+  "ok": "PASS"
+ },
+ {
+  "check": "B  HTTP public route",
+  "got": "200 passed-to-gateway",
+  "expect": "200 passed-to-gateway",
+  "ok": "PASS"
+ },
+ {
+  "check": "B  protected route with the Hermes bearer",
+  "got": "200 passed-to-gateway",
+  "expect": "200 passed-to-gateway",
+  "ok": "PASS"
+ },
+ {
+  "check": "B  protected route WITHOUT the Hermes bearer: gateway auth still decides",
+  "got": "401 passed-to-gateway",
+  "expect": "401 passed-to-gateway",
+  "ok": "PASS"
+ },
+ {
+  "check": "no grant at all, valid bearer",
+  "got": "401 GATE-DENIED",
+  "expect": "401 GATE-DENIED",
+  "ok": "PASS"
+ },
+ {
+  "check": "two real gateway sockets open for B",
+  "got": "['hermes-gateway-v1', 'hermes-gateway-v1']",
+  "expect": "hermes-gateway-v1",
+  "ok": "PASS"
+ },
+ {
+  "check": "sockets open before logout",
+  "got": "True",
+  "expect": "True",
+  "ok": "PASS"
+ },
+ {
+  "check": "B  Odysseus logout",
+  "got": "200",
+  "expect": "200",
+  "ok": "PASS"
+ },
+ {
+  "check": "B  both live sockets closed",
+  "got": "[(4401, 'Odysseus session ended'), (4401, 'Odysseus session ended')]",
+  "expect": "4401",
+  "ok": "PASS"
+ },
+ {
+  "check": "B  time from logout to both closed (seconds)",
+  "got": "0.02",
+  "expect": null,
+  "ok": ""
+ },
+ {
+  "check": "B close latency under 2 s",
+  "got": "0.02",
+  "expect": "<2",
+  "ok": "PASS"
+ },
+ {
+  "check": "B  HTTP right after logout",
+  "got": "401 GATE-DENIED",
+  "expect": "401 GATE-DENIED",
+  "ok": "PASS"
+ },
+ {
+  "check": "B  WebSocket reconnect attempt 1",
+  "got": "401 GATE-DENIED",
+  "expect": "401 GATE-DENIED",
+  "ok": "PASS"
+ },
+ {
+  "check": "B  WebSocket reconnect attempt 2",
+  "got": "401 GATE-DENIED",
+  "expect": "401 GATE-DENIED",
+  "ok": "PASS"
+ },
+ {
+  "check": "DIRECT gateway port with the same Hermes token (no proxy, no grant)",
+  "got": "200",
+  "expect": "200",
+  "ok": "PASS"
+ },
+ {
+  "check": "DIRECT gateway health",
+  "got": "200",
+  "expect": "200",
+  "ok": "PASS"
+ }
+]

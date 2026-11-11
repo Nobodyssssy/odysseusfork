@@ -216,6 +216,7 @@ class LaunchRouteTests(unittest.TestCase):
         service = Mock()
         service.status.return_value = {'enabled': True, 'state': 'ready', 'backend': 'gateway'}
         service.launch.return_value = 'http://hermes.localhost:17000/#launch=' + SECRET
+        service.grants = None                  # grants off: the legacy contract (the gateway link itself) is unchanged
         app.include_router(modes.make_router(service))
         return TestClient(app, base_url='http://127.0.0.1:17000', client=(address, 40000)), service
 

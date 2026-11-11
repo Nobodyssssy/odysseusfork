@@ -1,0 +1,104 @@
+[
+ {
+  "check": "C and D grants work before the restart",
+  "got": "('200 passed-to-gateway', '200 passed-to-gateway')",
+  "expect": "('200 passed-to-gateway', '200 passed-to-gateway')",
+  "ok": "PASS"
+ },
+ {
+  "check": "earlier revoked grants A and B are denied before the restart",
+  "got": "('401 GATE-DENIED', '401 GATE-DENIED')",
+  "expect": "('401 GATE-DENIED', '401 GATE-DENIED')",
+  "ok": "PASS"
+ },
+ {
+  "check": "D session present in the preview sessions file before the edit",
+  "got": "True",
+  "expect": "True",
+  "ok": "PASS"
+ },
+ {
+  "check": "port 19800 is down during the restart window",
+  "got": "True",
+  "expect": "True",
+  "ok": "PASS"
+ },
+ {
+  "check": "Odysseus is back up",
+  "got": "True",
+  "expect": "True",
+  "ok": "PASS"
+ },
+ {
+  "check": "C (Odysseus session survived the restart) still admitted",
+  "got": "200 passed-to-gateway",
+  "expect": "200 passed-to-gateway",
+  "ok": "PASS"
+ },
+ {
+  "check": "D (Odysseus session gone while down) is denied with no callback ever delivered",
+  "got": "401 GATE-DENIED",
+  "expect": "401 GATE-DENIED",
+  "ok": "PASS"
+ },
+ {
+  "check": "A and B stay revoked after the restart",
+  "got": "('401 GATE-DENIED', '401 GATE-DENIED')",
+  "expect": "('401 GATE-DENIED', '401 GATE-DENIED')",
+  "ok": "PASS"
+ },
+ {
+  "check": "a brand-new login can launch Projects after the restart",
+  "got": "200 passed-to-gateway",
+  "expect": "200 passed-to-gateway",
+  "ok": "PASS"
+ },
+ {
+  "check": "C Odysseus logout after the restart",
+  "got": "200",
+  "expect": "200",
+  "ok": "PASS"
+ },
+ {
+  "check": "C denied after logging out post-restart",
+  "got": "401 GATE-DENIED",
+  "expect": "401 GATE-DENIED",
+  "ok": "PASS"
+ },
+ {
+  "check": "E admitted by the gate and by the gateway (old Hermes token)",
+  "got": "200 passed-to-gateway",
+  "expect": "200 passed-to-gateway",
+  "ok": "PASS"
+ },
+ {
+  "check": "gateway is back up",
+  "got": "True",
+  "expect": "True",
+  "ok": "PASS"
+ },
+ {
+  "check": "E still passes the GATE; the gateway decides about its own token (lab gateway keeps it on disk)",
+  "got": "200 passed-to-gateway",
+  "expect": "200 passed-to-gateway",
+  "ok": "PASS"
+ },
+ {
+  "check": "E with no Hermes token: gateway still demands its own authentication",
+  "got": "401 passed-to-gateway",
+  "expect": "401 passed-to-gateway",
+  "ok": "PASS"
+ },
+ {
+  "check": "E Odysseus logout",
+  "got": "200",
+  "expect": "200",
+  "ok": "PASS"
+ },
+ {
+  "check": "E denied by the gate afterwards",
+  "got": "401 GATE-DENIED",
+  "expect": "401 GATE-DENIED",
+  "ok": "PASS"
+ }
+]

@@ -519,7 +519,9 @@ class ExtraHostsAndOriginsTests(unittest.TestCase):
 
     def test_install_uses_the_environment_and_fails_closed(self):
         class App:
-            def __init__(self): self.added = []
+            def __init__(self):
+                self.added = []
+                self.state = mock.Mock(spec=[])
             def add_middleware(self, cls, **kwargs): self.added.append((cls, kwargs))
         service = mock.Mock(proxy=False)
         service.config.url = 'http://127.0.0.1:9120'
@@ -530,9 +532,12 @@ class ExtraHostsAndOriginsTests(unittest.TestCase):
         app = App()
         self.assertTrue(install_hermes_proxy(app, service, {}))
         self.assertEqual(app.added[0][1]['mode'], 'webui')                          # default is the legacy behaviour
-        app = App()
-        self.assertTrue(install_hermes_proxy(app, service, {'ODYSSEUS_HERMES_PROXY_MODE': 'gateway'}))
-        self.assertEqual(app.added[0][1]['mode'], 'gateway')
+        app = App()                                                                   # gateway mode needs a session manager to bind grants to
+        self.assertFalse(install_hermes_proxy(app, service, {'ODYSSEUS_HERMES_PROXY_MODE': 'gateway'}))
+        self.assertEqual(app.added, [])
+        app = App()                                                                   # explicit opt-out is allowed (and logged)
+        self.assertTrue(install_hermes_proxy(app, service, {'ODYSSEUS_HERMES_PROXY_MODE': 'gateway', 'ODYSSEUS_HERMES_PROXY_GRANTS': '0'}))
+        self.assertEqual((app.added[0][1]['mode'], app.added[0][1]['grants'], service.grants), ('gateway', None, None))
 
     def test_non_loopback_peer_is_refused(self):
         proxy = HermesHostProxy(odysseus, 'http://127.0.0.1:9120', mode='gateway')

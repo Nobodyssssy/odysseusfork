@@ -24,3 +24,8 @@ decisions are therefore verified at the approval layer, not by running shell com
 
 `stub_llm.py` also answers `STREAM:SLOW` with 60 tokens 0.4 s apart and logs whether the client disconnected (`logs/stub-stream.log`), for streaming and Stop checks.
 Paths are hard-coded to `F:\Odysseus-Backups\desktop-lab`; the preview needs a venv built from `requirements.txt` at `ody-full-venv`.
+
+## Scoped-logout probes (run against the preview)
+
+    python tools/logout_probe.py            # revoked grants, a second browser session, live gateway sockets closing at logout, the direct-port limitation (needs the browser run's grants-live.json)
+    python tools/logout_restart_probe.py    # Odysseus restart, session expiring while down, gateway restart (restarts the PREVIEW services only)

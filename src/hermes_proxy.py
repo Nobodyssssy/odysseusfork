@@ -23,6 +23,12 @@ Additionally in ``gateway`` mode (a refusal never reaches Hermes):
   * WebSocket upgrades must carry an allowed Origin (browsers always send one) unless explicitly relaxed;
   * Hermes' CORS response headers are dropped: this proxy grants no cross-origin access.
 
+Access grants (gateway mode, on by default; ODYSSEUS_HERMES_PROXY_GRANTS=0 disables them explicitly): every request and WebSocket upgrade on the Hermes
+origin must also carry a live server-side grant (src/hermes_grants.py) bound to the Odysseus browser session that launched Projects. The grant is an
+ADDITIONAL gate in front of the gateway's own authentication, never a substitute for it. Logging out of Odysseus (or any end of that session) revokes the
+grant on the next request and closes this proxy's open WebSockets and streams. The grant cookie is stripped from what is forwarded, and an upstream
+response cannot set or clear it. It does not and cannot revoke copied upstream Hermes cookies or protect direct access to the gateway's own port.
+
 The proxy keeps no cookies: its shared HTTP client would otherwise store a Hermes login and attach it to later
 requests from any local process. This is not a security boundary beyond the checks above; Hermes keeps its own auth.
 """
@@ -35,6 +41,8 @@ import time
 from urllib.parse import urlsplit
 
 import httpx
+
+from src.hermes_grants import ENTER_PATH, GRANT_COOKIE, GrantError
 
 PROXY_HOST = 'hermes.localhost'
 MODES = ('webui', 'gateway')
@@ -97,12 +105,16 @@ class ProxyPolicy:
     allow_missing_origin_ws: bool = False        # browsers always send one; a native client should dial the gateway itself
     ws_max_bytes: int = DEFAULT_WS_MAX_MB * 1024 * 1024
     pass_host: bool = False                      # False: present the gateway's own authority upstream; True: the browser's Host/Origin
+    require_enter_referer: bool = True           # the grant exchange must be a navigation that came from the Odysseus origin
 
     def hosts(self, port):
         accepted = {f'{name}:{port}' for name in self.names}
         if port == 80:
             accepted |= set(self.names)
         return accepted
+
+    def odysseus_origins(self, port):
+        return {f'http://localhost:{port}', f'http://127.0.0.1:{port}'}
 
     def origins(self, port):
         return {f'http://{host}' for host in self.hosts(port)} | set(self.extra_origins)
@@ -135,7 +147,8 @@ class ProxyPolicy:
             raise ProxyConfigError("ODYSSEUS_HERMES_PROXY_UPSTREAM_HOST must be 'bound' or 'public'")
         return cls(names=frozenset(names), extra_origins=frozenset(origins),
                    allow_missing_origin_ws=environment.get('ODYSSEUS_HERMES_PROXY_WS_NO_ORIGIN') == '1',
-                   ws_max_bytes=int(megabytes) * 1024 * 1024, pass_host=upstream_host == 'public')
+                   ws_max_bytes=int(megabytes) * 1024 * 1024, pass_host=upstream_host == 'public',
+                   require_enter_referer=environment.get('ODYSSEUS_HERMES_ENTER_REFERER') != '0')
 
 
 UVICORN_DEFAULT_WS_MAX = 16 * 1024 * 1024
@@ -199,7 +212,7 @@ class _StatelessClient(httpx.AsyncClient):
 
 
 class HermesHostProxy:
-    def __init__(self, app, upstream, mode='webui', policy=None):
+    def __init__(self, app, upstream, mode='webui', policy=None, grants=None):
         parts = urlsplit(upstream)
         if parts.scheme != 'http' or parts.hostname != '127.0.0.1' or not parts.port:
             raise ValueError('The Hermes upstream must be an explicit http://127.0.0.1:PORT/ address')
@@ -210,6 +223,7 @@ class HermesHostProxy:
         self.authority = f'127.0.0.1:{parts.port}'
         self.mode = mode
         self.policy = policy or ProxyPolicy()
+        self.grants = grants if mode == 'gateway' else None
         self._client = None
 
     def _http(self):
@@ -271,6 +285,98 @@ class HermesHostProxy:
                 return 403, b'Cross-site request refused.'
         return None
 
+    @staticmethod
+    def _cookie_values(scope):
+        values = []
+        for name, raw in scope['headers']:
+            if name == b'cookie':
+                for part in raw.decode('latin-1').split(';'):
+                    key, _, value = part.strip().partition('=')
+                    if key == GRANT_COOKIE:
+                        values.append(value)
+        return values
+
+    @staticmethod
+    def _without_grant_cookie(headers):
+        """The request headers with our grant cookie removed (the gateway and the agent behind it must never see it); other cookies are kept verbatim."""
+        out = []
+        for name, value in headers:
+            if name == b'cookie':
+                kept = [part.strip() for part in value.decode('latin-1').split(';') if part.strip().partition('=')[0] != GRANT_COOKIE]
+                if not kept:
+                    continue
+                value = '; '.join(kept).encode('latin-1')
+            out.append((name, value))
+        return out
+
+    def _authorize(self, scope):
+        """The live grant for this request, or None. Zero cookies, conflicting duplicates, a bad value, a revoked grant and any internal failure all deny."""
+        values = self._cookie_values(scope)
+        if len(set(values)) != 1:
+            return None
+        try:
+            return self.grants.authorize(values[0])
+        except Exception:
+            log.error('grant validation failed; denying', exc_info=True)
+            return None
+
+    def _deny_no_grant(self, scope):
+        """(status, message, headers) for a request without a live grant: navigations are sent back to Odysseus, everything else gets a plain 401."""
+        extra = [(b'x-odysseus-grant', b'required')]
+        headers = dict(scope['headers'])
+        navigating = headers.get(b'sec-fetch-mode') == b'navigate' or (b'sec-fetch-mode' not in headers and b'text/html' in headers.get(b'accept', b''))
+        if navigating and scope['type'] == 'http' and scope['method'] in ('GET', 'HEAD'):
+            return 302, b'Open Hermes from Odysseus (Projects).', extra + [(b'location', f'http://localhost:{self._port(scope)}/'.encode())]
+        return 401, b'Open Hermes from Odysseus (Projects).', extra
+
+    async def _fail(self, send, status, message, extra=()):
+        await send({'type': 'http.response.start', 'status': status,
+                    'headers': _ERROR_HEADERS + list(extra) + [(b'content-length', str(len(message)).encode())]})
+        await send({'type': 'http.response.body', 'body': message})
+
+    async def _enter(self, scope, receive, send):
+        """GET /__odysseus/enter?ticket=...: redeem a one-use ticket, set this browser's grant cookie, redirect to the server-held target.
+
+        Everything here is checked before the ticket is looked at, and every failure is the same generic 403 (no oracle)."""
+        refusal = self._refuse(scope, websocket=False)
+        if refusal:
+            return await self._fail(send, *refusal)
+        headers = dict(scope['headers'])
+        deny = (403, b'Could not open Hermes from Odysseus. Return to Odysseus and choose Projects again.', [])
+        if scope['method'] != 'GET':
+            return await self._fail(send, 405, b'Method not allowed.', [(b'allow', b'GET')])
+        if headers.get(b'sec-fetch-mode', b'navigate') != b'navigate' or headers.get(b'sec-fetch-dest', b'document') != b'document':
+            return await self._fail(send, *deny)
+        if self.policy.require_enter_referer:
+            referer = urlsplit(headers.get(b'referer', b'').decode('latin-1'))
+            try:
+                ok = (referer.scheme == 'http' and not referer.username and not referer.password
+                      and f'http://{referer.hostname}:{referer.port}' in self.policy.odysseus_origins(self._port(scope)))
+            except ValueError:
+                ok = False
+            if not ok:
+                return await self._fail(send, *deny)
+        query = scope.get('query_string', b'').decode('latin-1')
+        pairs = [part.partition('=') for part in query.split('&') if part]
+        tickets = [value for key, _, value in pairs if key == 'ticket']
+        values = set(self._cookie_values(scope))
+        try:
+            if len(tickets) != 1 or len(pairs) != 1:
+                raise GrantError('refused')
+            secret, target, max_age = self.grants.exchange(tickets[0], next(iter(values)) if len(values) == 1 else None)
+        except GrantError:
+            log.warning('grant exchange refused')
+            return await self._fail(send, *deny)
+        except Exception:
+            log.error('grant exchange failed; denying', exc_info=True)
+            return await self._fail(send, *deny)
+        out = [(b'location', target.encode('latin-1')), (b'cache-control', b'no-store'), (b'pragma', b'no-cache'), (b'referrer-policy', b'no-referrer'),
+               (b'x-content-type-options', b'nosniff'), (b'content-length', b'0')]
+        if secret:
+            out.append((b'set-cookie', f'{GRANT_COOKIE}={secret}; Path=/; HttpOnly; SameSite=Lax; Max-Age={max_age}'.encode('latin-1')))
+        await send({'type': 'http.response.start', 'status': 303, 'headers': out})
+        await send({'type': 'http.response.body', 'body': b''})
+
     async def __call__(self, scope, receive, send):
         if scope['type'] not in ('http', 'websocket') or not self._matches(scope):
             return await self.app(scope, receive, send)
@@ -278,18 +384,22 @@ class HermesHostProxy:
             if self.mode != 'gateway':
                 await receive()
                 return await send({'type': 'websocket.close', 'code': 1008})
+            if self.grants is not None and scope['path'] == ENTER_PATH:
+                await receive()
+                return await send({'type': 'websocket.close', 'code': 1008})
             return await self._websocket(scope, receive, send)
+        if self.grants is not None and scope['path'] == ENTER_PATH:
+            return await self._enter(scope, receive, send)
         refusal = self._refuse(scope, websocket=False)
         if refusal:
             log.warning('refused %s %s: %s', scope['method'], scope['path'], refusal[1].decode())
             return await self._fail(send, *refusal)
-        await self._forward(scope, receive, send)
-
-    @staticmethod
-    async def _fail(send, status, message):
-        await send({'type': 'http.response.start', 'status': status,
-                    'headers': _ERROR_HEADERS + [(b'content-length', str(len(message)).encode())]})
-        await send({'type': 'http.response.body', 'body': message})
+        grant = None
+        if self.grants is not None:
+            grant = self._authorize(scope)
+            if grant is None:
+                return await self._fail(send, *self._deny_no_grant(scope))
+        await self._forward(scope, receive, send, grant)
 
     def _toward_upstream(self, scope, headers):
         """gateway mode: present the gateway's own bound authority (the browser's values were already validated).
@@ -308,16 +418,22 @@ class HermesHostProxy:
             rewritten.append((name, value))
         return rewritten
 
-    async def _forward(self, scope, receive, send):
+    async def _forward(self, scope, receive, send, grant=None):
         headers = self._toward_upstream(scope, [(n, v) for n, v in scope['headers'] if n not in _HOP_BY_HOP])
+        if self.grants is not None:
+            headers = self._without_grant_cookie(headers)
         names = {n for n, _ in headers}
         has_body = b'transfer-encoding' in dict(scope['headers']) or (b'content-length' in names and dict(headers)[b'content-length'] != b'0')
+        watch = self.grants.watch(grant.key, asyncio.get_running_loop()) if grant else None
+        revoked = asyncio.ensure_future(watch.event.wait()) if watch else None
 
         async def body():
             while True:
                 message = await receive()
                 if message['type'] == 'http.disconnect':
                     raise ConnectionAbortedError('client disconnected')
+                if watch and watch.event.is_set():
+                    raise ConnectionAbortedError('grant revoked')
                 if message.get('body'):
                     yield message['body']
                 if not message.get('more_body'):
@@ -327,21 +443,29 @@ class HermesHostProxy:
         if scope.get('query_string'):
             target += '?' + scope['query_string'].decode('latin-1')
         request = self._http().build_request(scope['method'], target, headers=headers, content=body() if has_body else None)
+        watcher = None
+        upstream = None
         try:
-            upstream = await self._http().send(request, stream=True)
-        except ConnectionAbortedError:
-            return
-        except (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout):
-            return await self._fail(send, 502, b'Hermes is not running. Open Odysseus and select Hermes Mode to start it.')
-        except httpx.HTTPError:
-            return await self._fail(send, 502, b'Hermes returned an invalid response.')
+            pending = asyncio.ensure_future(self._http().send(request, stream=True))
+            if revoked is not None:
+                await asyncio.wait({pending, revoked}, return_when=asyncio.FIRST_COMPLETED)
+                if revoked.done() and not pending.done():
+                    pending.cancel()
+                    return await self._fail(send, 401, b'Open Hermes from Odysseus (Projects).', [(b'x-odysseus-grant', b'required')])
+            try:
+                upstream = await pending
+            except ConnectionAbortedError:
+                return
+            except (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout):
+                return await self._fail(send, 502, b'Hermes is not running. Open Odysseus and select Hermes Mode to start it.')
+            except httpx.HTTPError:
+                return await self._fail(send, 502, b'Hermes returned an invalid response.')
 
-        async def watch_disconnect():
-            while (await receive())['type'] != 'http.disconnect':
-                pass
+            async def watch_disconnect():
+                while (await receive())['type'] != 'http.disconnect':
+                    pass
 
-        watcher = asyncio.ensure_future(watch_disconnect())
-        try:
+            watcher = asyncio.ensure_future(watch_disconnect())
             own_origin = 'http://' + self._host(scope)
             response_headers = []
             for name, value in upstream.headers.raw:
@@ -350,6 +474,8 @@ class HermesHostProxy:
                     continue
                 if self.mode == 'gateway' and lowered.startswith(b'access-control-'):
                     continue                         # same-origin only: this proxy grants no cross-origin access
+                if self.grants is not None and lowered == b'set-cookie' and value.lstrip().startswith(GRANT_COOKIE.encode() + b'='):
+                    continue                         # the gateway can neither set nor clear this proxy's grant cookie
                 if lowered == b'location' and value.startswith(self.upstream.encode()):
                     value = own_origin.encode() + value[len(self.upstream):]
                 response_headers.append((lowered, value))
@@ -357,21 +483,35 @@ class HermesHostProxy:
             if scope['method'] == 'HEAD':
                 return await send({'type': 'http.response.body', 'body': b''})
             iterator = upstream.aiter_raw().__aiter__()
+            chunk_task = None
             while True:
-                chunk_task = asyncio.ensure_future(iterator.__anext__())
-                await asyncio.wait({chunk_task, watcher}, return_when=asyncio.FIRST_COMPLETED)
-                if not chunk_task.done():
+                if chunk_task is None:
+                    chunk_task = asyncio.ensure_future(iterator.__anext__())
+                waiting = {chunk_task, watcher} | ({revoked} if revoked is not None else set())
+                done, _ = await asyncio.wait(waiting, timeout=2.0 if grant else None, return_when=asyncio.FIRST_COMPLETED)
+                if not done:                         # periodic re-validation: the Odysseus session may have ended without a callback
+                    if grant and not self.grants.check(grant.key):
+                        chunk_task.cancel()
+                        return
+                    continue
+                if (revoked is not None and revoked.done()) or chunk_task not in done:
                     chunk_task.cancel()
                     return
                 try:
                     chunk = chunk_task.result()
                 except StopAsyncIteration:
                     break
+                chunk_task = None
                 await send({'type': 'http.response.body', 'body': chunk, 'more_body': True})
             await send({'type': 'http.response.body', 'body': b''})
         finally:
-            watcher.cancel()
-            await upstream.aclose()
+            if watcher is not None:
+                watcher.cancel()
+            if revoked is not None:
+                revoked.cancel()
+                self.grants.unwatch(grant.key, watch)
+            if upstream is not None:
+                await upstream.aclose()
 
     # ── WebSocket relay (gateway mode) ──────────────────────────────────────────────────────────
     @staticmethod
@@ -390,6 +530,12 @@ class HermesHostProxy:
         if refusal:
             log.warning('refused WebSocket %s: %s', scope['path'], refusal[1].decode())
             return await self._ws_refuse(scope, send, *refusal)
+        grant = None
+        if self.grants is not None:
+            grant = self._authorize(scope)
+            if grant is None:
+                log.warning('refused WebSocket %s: no live grant', scope['path'])
+                return await self._ws_refuse(scope, send, 401, b'Open Hermes from Odysseus (Projects).')
         client = _websockets()
         if client is None:
             log.error('WebSocket support (the websockets package) is not installed; refusing %s', scope['path'])
@@ -398,7 +544,7 @@ class HermesHostProxy:
         target = scope['raw_path'].decode('latin-1') if scope.get('raw_path') else scope['path']
         if scope.get('query_string'):
             target += '?' + scope['query_string'].decode('latin-1')
-        forwarded = [(n.decode('latin-1'), v.decode('latin-1')) for n, v in scope['headers']
+        forwarded = [(n.decode('latin-1'), v.decode('latin-1')) for n, v in self._without_grant_cookie(scope['headers'])
                      if n not in _WS_HANDSHAKE and n not in _HOP_BY_HOP]
         browser_origin = next((v.decode('latin-1') for n, v in scope['headers'] if n == b'origin'), None)
         if self.policy.pass_host:
@@ -415,7 +561,18 @@ class HermesHostProxy:
             return await self._ws_refuse(scope, send, exc.response.status_code, body)
         except (OSError, asyncio.TimeoutError, errors.WebSocketException):
             return await self._ws_refuse(scope, send, 502, b'Hermes is not running. Open Odysseus and select Hermes Mode to start it.')
+        watch = self.grants.watch(grant.key, asyncio.get_running_loop()) if grant else None
         await send({'type': 'websocket.accept', 'subprotocol': upstream.subprotocol})
+
+        async def guard():
+            """Ends the relay the moment the grant is revoked, and re-validates every 2 s for endings nobody announced (expiry, a deleted user)."""
+            while True:
+                try:
+                    await asyncio.wait_for(watch.event.wait(), 2.0)
+                    return 'revoked', 4401
+                except asyncio.TimeoutError:
+                    if not self.grants.check(grant.key):
+                        return 'revoked', 4401
 
         async def to_upstream():
             while True:
@@ -441,6 +598,8 @@ class HermesHostProxy:
                 return 'upstream', None
 
         tasks = {asyncio.ensure_future(to_upstream()), asyncio.ensure_future(to_client())}
+        if watch is not None:
+            tasks.add(asyncio.ensure_future(guard()))
         side, code = 'error', 1011
         try:
             done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
@@ -460,6 +619,9 @@ class HermesHostProxy:
                 elif side == 'upstream':
                     reason = _close_reason(upstream.close_reason)
                     await send({'type': 'websocket.close', 'code': _close_code(upstream.close_code), 'reason': reason})
+                elif side == 'revoked':
+                    await send({'type': 'websocket.close', 'code': 4401, 'reason': 'Odysseus session ended'})
+                    await upstream.close(1000, 'Odysseus session ended')
                 else:
                     await upstream.close(1011)
                     await send({'type': 'websocket.close', 'code': 1011})
@@ -467,6 +629,8 @@ class HermesHostProxy:
                 log.debug('WebSocket close relay failed', exc_info=True)
             finally:
                 await upstream.close()
+                if watch is not None:
+                    self.grants.unwatch(grant.key, watch)
 
 
 _resolution = {'ok': None, 'checked': 0.0}
@@ -484,6 +648,28 @@ def hostname_resolves():
     return _resolution['ok']
 
 
+def build_grant_store(app, environment):
+    """The grant store for gateway mode, or None when it cannot be built (the caller then does not install the proxy: Projects stays closed)."""
+    import os
+    from src.hermes_grants import DEFAULT_GRANT_TTL, GrantStore, GrantStoreError
+    auth = getattr(app.state, 'auth_manager', None)
+    hours = environment.get('ODYSSEUS_HERMES_GRANT_TTL_HOURS')
+    if auth is None or not getattr(auth, 'auth_path', None) or not hasattr(auth, 'lookup_session_digest'):
+        log.error('Hermes proxy not installed: there is no Odysseus session manager to bind access grants to')
+        return None
+    if hours is not None and not (hours.isdigit() and 1 <= int(hours) <= 168):
+        log.error('Hermes proxy not installed: ODYSSEUS_HERMES_GRANT_TTL_HOURS must be a whole number from 1 to 168')
+        return None
+    try:
+        store = GrantStore(os.path.join(os.path.dirname(auth.auth_path), 'hermes-grants.db'), auth.lookup_session_digest,
+                           grant_ttl=int(hours) * 3600 if hours else DEFAULT_GRANT_TTL)
+    except GrantStoreError as exc:
+        log.error('Hermes proxy not installed: %s', exc)
+        return None
+    auth.add_revoke_listener(store.sessions_revoked)
+    return store
+
+
 def install_hermes_proxy(app, service, environment=None):
     """Install as the outermost middleware so Odysseus auth, CSP and compression never touch Hermes traffic."""
     import os
@@ -498,8 +684,17 @@ def install_hermes_proxy(app, service, environment=None):
     except ProxyConfigError as exc:
         log.error('Hermes proxy not installed: %s', exc)
         return False
-    app.add_middleware(HermesHostProxy, upstream=service.config.url, mode=mode, policy=policy)
+    grants = None
+    if mode == 'gateway':
+        if source.get('ODYSSEUS_HERMES_PROXY_GRANTS') == '0':
+            log.warning('Projects access grants are DISABLED: Hermes requests are not tied to an Odysseus session and Odysseus logout does not end them')
+        else:
+            grants = build_grant_store(app, source)
+            if grants is None:
+                return False
+    app.add_middleware(HermesHostProxy, upstream=service.config.url, mode=mode, policy=policy, grants=grants)
     if mode == 'gateway':
         redact_request_logs()
+    service.grants = grants
     service.proxy = True
     return True

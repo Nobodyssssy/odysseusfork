@@ -43,10 +43,7 @@ re-verified first). A failed build is marked `failed`, never referenced, and lea
 ## Not covered
 Production move, the logout cascade, an OS-level sandbox, `websockets` in the production venv, hooking the component into the Odysseus service menu / backup set.
 
-## Logout: upstream facts (read-only, pinned source)
-- `POST /auth/logout` calls `provider.revoke_session(refresh_token)` and clears cookies in that browser.
-- The basic-auth provider's `revoke_session` is a documented no-op (stateless HMAC tokens, expiry only). **Upstream supports no per-session revocation for it**; a copied cookie stays valid until its TTL.
-- Hermes-side `webapp-sign-out` (control socket) revokes the Webapp token for all browsers (observed in the preview).
-- Consequence: scoped logout needs an Odysseus proxy-side gate (design pending, not implemented): the proxy admits Hermes HTTP/WS only while a per-Odysseus-session
-  grant is live, and refuses new WS upgrades and in-flight sockets when Odysseus logs out. Limitation to state honestly: this closes the browser/web vector only; a
-  holder of the raw Hermes cookie who bypasses Odysseus (direct port) is stopped by the loopback bind plus the Host/Origin checks, not by the gate.
+## Logout
+Upstream facts (pinned source): `POST /auth/logout` clears cookies in one browser; the basic-auth provider's `revoke_session` is a documented no-op (stateless HMAC tokens), so
+there is no upstream per-session revocation, and `webapp-sign-out` is global. Scoped logout is therefore implemented on the Odysseus side as server-side access grants bound to the
+Odysseus session: see `docs/hermes-webapp-grants.md` (design, live evidence, and the limits: it cannot revoke copied Hermes credentials or protect direct gateway access).

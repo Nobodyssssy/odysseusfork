@@ -64,6 +64,10 @@ configuration validation, extra hostname, legacy mode unchanged.
 - WebSocket with ONE valid one-use ticket: eight hostile upgrades (evil Origin, `null`, no Origin, other-port Origin, cross-site, `X-Forwarded-For`, forged Host, evil Host+Origin) were all refused by the proxy and the ticket was **still valid** afterwards (so the gateway never saw them); the legitimate upgrade then returned 101 with `hermes-gateway-v1`; replay of the ticket, a forged ticket and no ticket were refused.
 - Production compared with the pre-lab baseline (listeners, config, WebUI settings and sessions, both `.env`, `auth.json`, `component.json`, checkouts, Odysseus HEAD, plugins): unchanged.
 
+## Access grants (scoped logout)
+Gateway mode additionally gates the Hermes origin on a server-side grant bound to the Odysseus browser session (on by default; `ODYSSEUS_HERMES_PROXY_GRANTS=0` disables it explicitly).
+See `hermes-webapp-grants.md`. It is a second gate in front of the gateway's own authentication, never a substitute.
+
 ## Not verified / limitations
 
 Retired since the first version of this note (see `hermes-webapp-preview.md`): the real Odysseus application was run in front of the gateway;

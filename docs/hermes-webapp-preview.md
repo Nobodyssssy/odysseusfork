@@ -85,8 +85,9 @@ after a Hermes sign-out the Webapp says "Run hermes webapp on this computer to s
   metadata, `X-Forwarded-For`, forged Host, evil Host+Origin) all 403 and **did not consume the ticket**; the legitimate upgrade then 101 with
   `hermes-gateway-v1`; replay, forged and absent tickets 403. Unit tests cover the same matrix against a fake gateway.
 - Reload keeps the Webapp signed in (same tab). A new tab has no credential (all `/api/*` 401).
-- **Odysseus logout** revokes the Odysseus session (the launch route then 401) but **does not end an open Webapp session**: the two logins are
-  independent (live: Hermes token still 200 after Odysseus logout).
+- **Odysseus logout** (superseded by the scoped logout gate, `hermes-webapp-grants.md`): in this first preview it revoked only the Odysseus session and left an open Webapp
+  session working. With access grants on (the default in gateway mode) it now ends that browser session's access to Hermes through the proxy immediately, including open
+  sockets; it still cannot revoke a copied Hermes token or protect direct gateway access.
 - **Hermes sign-out** (`webapp-sign-out`, the control the CLI uses): closed 3 live sockets, old token 401, UI shows "Sign in to Hermes"; launching
   again from Odysseus restored the session (history intact).
 - Sign-in gate (`gate-probe.json`, 41 pass / 0 fail / 9 informational): unauthenticated `/` redirects to `/login`; wrong password and wrong user 401;
@@ -118,7 +119,7 @@ after a Hermes sign-out the Webapp says "Run hermes webapp on this computer to s
 
 1. Direct Webapp routes (fs write/delete, Git, MCP server commands) bypass the agent guard (earlier lab finding, unchanged). Needs OS isolation or a source change.
 2. Same-user code can read the Webapp credential (`webapp\session-token`, or the gated login's secrets) and act as you.
-3. Logins are independent and logout does not cascade: decide whether Odysseus logout should call `webapp-sign-out` (it signs out *every* Webapp browser; not wired).
+3. Scoped logout is implemented and tested in the disposable preview (`hermes-webapp-grants.md`); it is not global sign-out and cannot revoke copied Hermes credentials or protect the gateway's own port. The grant database must join the backup set.
 4. Gated mode means a second (password) login; ungated mode means a bearer token in `sessionStorage`. Choose; a single login needs the P2-SSO design.
 5. The component manager cannot build, pin, start or back up the Webapp yet; Services controls do not cover the gateway.
 6. Install `websockets` in the production Odysseus venv first (gateway mode answers 501 to every WebSocket without it; fails closed).

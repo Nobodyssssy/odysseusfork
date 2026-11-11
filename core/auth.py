@@ -9,6 +9,8 @@ import os
 import secrets
 import threading
 import time
+import hashlib
+import hmac
 import logging
 from pathlib import Path
 from typing import Optional, Dict, Any, List
@@ -116,6 +118,9 @@ class AuthManager:
         # Guards mutations of self._sessions and the on-disk sessions.json.
         # Validate/create/revoke run concurrently from the FastAPI threadpool.
         self._sessions_lock = threading.RLock()
+        # Called (outside every lock) with the tokens of sessions that just ended, so dependants such as the Hermes Projects
+        # access grants can be revoked immediately. They must also re-check liveness on use: this is a prompt, not the only gate.
+        self._revoke_listeners = []
         # Guards all mutations of self._config and the on-disk auth.json so
         # concurrent create/delete/rename/privilege operations don't interleave
         # and corrupt the user database.
@@ -346,6 +351,7 @@ class AuthManager:
                 revoked += 1
         if revoked:
             self._save_sessions()
+        self._notify_revoked(to_drop)
         logger.info(f"Deleted user '{username}' (by {requesting_user}); revoked {revoked} active session(s)")
         return True
 
@@ -668,6 +674,7 @@ class AuthManager:
                     deleted_user = True
         if expired or deleted_user:
             self._save_sessions()
+            self._notify_revoked([token])
             return False
         return True
 
@@ -694,12 +701,38 @@ class AuthManager:
                     return _u
         if expired or deleted_user:
             self._save_sessions()
+            self._notify_revoked([token])
         return None
+
+    def add_revoke_listener(self, listener):
+        self._revoke_listeners.append(listener)
+
+    def _notify_revoked(self, tokens):
+        tokens = [token for token in tokens if token]
+        if not tokens:
+            return
+        for listener in list(self._revoke_listeners):
+            try:
+                listener(tokens)
+            except Exception:
+                logger.error("Session revocation listener failed", exc_info=True)
+
+    def lookup_session_digest(self, session_digest: str):
+        """(username, expiry) of the live session whose token has this SHA-256 hex digest, else None. Constant-time per candidate."""
+        found = None
+        with self._sessions_lock:
+            for token, session in self._sessions.items():
+                if hmac.compare_digest(hashlib.sha256(token.encode("utf-8")).hexdigest(), session_digest):
+                    found = session
+        if not found or time.time() > found.get("expiry", 0) or found.get("username") not in self.users:
+            return None
+        return found["username"], found["expiry"]
 
     def revoke_token(self, token: str):
         with self._sessions_lock:
             self._sessions.pop(token, None)
         self._save_sessions()
+        self._notify_revoked([token])
 
     def revoke_user_sessions(self, username: str, except_token: Optional[str] = None) -> int:
         """Revoke active browser sessions for a user, optionally preserving one."""
@@ -715,6 +748,7 @@ class AuthManager:
                 revoked += 1
             if revoked:
                 self._save_sessions()
+        self._notify_revoked(to_drop)
         return revoked
 
     def status(self, token: Optional[str]) -> Dict[str, Any]:

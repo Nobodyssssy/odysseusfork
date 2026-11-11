@@ -131,6 +131,7 @@ class ModeService:
         self.config = config
         self.error = error
         self.proxy = False
+        self.grants = None                     # set by install_hermes_proxy in gateway mode when access grants are on
         self._lock = threading.Lock()
         self._process = None
 
@@ -315,6 +316,25 @@ def require_browser_admin(request):
     require_admin(request)
 
 
+def enter_url(grants, request, launch_url, port):
+    """Turn the gateway's one-use launch link into an opaque Odysseus ticket URL.
+
+    The launch link (a Hermes credential) is kept server-side in the ticket and only reappears in the redirect that the proxy issues to the browser,
+    so it never passes through Odysseus JavaScript. The ticket is bound to this Odysseus session, which is re-read from the cookie and checked against
+    the identity the middleware established; a mismatch means a different caller, and nothing is issued."""
+    from fastapi import HTTPException
+    from src.hermes_grants import ENTER_PATH, GrantError
+    token = request.cookies.get('odysseus_session')
+    user = getattr(request.state, 'current_user', None)
+    parts = urlsplit(launch_url)
+    target = (parts.path or '/') + (f'?{parts.query}' if parts.query else '') + (f'#{parts.fragment}' if parts.fragment else '')
+    try:
+        ticket = grants.create_ticket(token, user, target)
+    except GrantError as exc:
+        raise HTTPException(403, 'Projects access could not be granted for this session') from exc
+    return f'http://{PROJECTS_HOST}:{port}{ENTER_PATH}?ticket={ticket}'
+
+
 def make_router(service):
     from fastapi import APIRouter, HTTPException, Request
 
@@ -357,6 +377,8 @@ def make_router(service):
             url = service.launch(port)
         except RuntimeError as exc:
             raise HTTPException(409, str(exc)) from exc
+        if getattr(service, 'grants', None) is not None:
+            url = enter_url(service.grants, request, url, port)
         return JSONResponse({'url': url}, headers={'Cache-Control': 'no-store', 'Pragma': 'no-cache', 'Referrer-Policy': 'no-referrer'})
 
     @router.post('/hermes/stop')
