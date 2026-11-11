@@ -60,6 +60,103 @@ async function request(path, method = 'GET') {
   return result;
 }
 
+async function post(path, timeout = 60000) {
+  const response = await fetch(path, { method: 'POST', credentials: 'same-origin', signal: AbortSignal.timeout(timeout) });
+  const result = await response.json().catch(() => ({}));
+  return { response, result };
+}
+
+async function hermesAction(kind) {
+  let force = false;
+  for (;;) {
+    const { response, result } = await post(`${endpoint}/hermes/${kind}${force ? '?force=true' : ''}`);
+    if (response.ok) return result;
+    if (response.status === 409 && result.force_required && !force) {
+      if (!window.confirm(`${result.detail}\n\n${kind === 'stop' ? 'Stop' : 'Restart'} Hermes anyway?`)) throw new Error('Cancelled. Hermes was not changed.');
+      force = true;
+      continue;
+    }
+    throw new Error(result.detail || 'Hermes request failed');
+  }
+}
+
+async function waitForHermes(message) {
+  const deadline = Date.now() + 90000;
+  for (;;) {
+    const status = await request(endpoint);
+    if (status.state === 'ready') return status;
+    if (status.state === 'conflict') throw new Error('Another program is using the Hermes port. Nothing was restarted.');
+    if (Date.now() > deadline) throw new Error('Hermes did not become ready in 90 seconds. Check its launch log.');
+    message.textContent = 'Starting Hermes…';
+    await new Promise(resolve => setTimeout(resolve, 1000));
+  }
+}
+
+async function waitForOdysseus(message) {
+  const deadline = Date.now() + 150000;
+  let sawDown = false;
+  while (Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    try {
+      const response = await fetch(endpoint, { credentials: 'same-origin', signal: AbortSignal.timeout(3000) });
+      if (response.ok && sawDown) return location.reload();
+      if (!response.ok) sawDown = true;
+    } catch (_) {
+      sawDown = true;
+      message.textContent = 'Odysseus is restarting…';
+    }
+  }
+  message.textContent = 'Odysseus did not come back in time. Check the scheduled task "Odysseus AutoStart".';
+}
+
+function serviceMenu(status, message) {
+  const available = status.controls || {};
+  const actions = [
+    ['hermes_restart', 'Restart Hermes', async () => {
+      message.textContent = 'Restarting Hermes…';
+      await hermesAction('restart');
+      await waitForHermes(message);
+      message.textContent = 'Hermes restarted.';
+    }],
+    ['hermes_stop', 'Stop Hermes', async () => {
+      if (!window.confirm('Stop Hermes? Anything open at hermes.localhost will stop responding until you start it again.')) return;
+      message.textContent = 'Stopping Hermes…';
+      await hermesAction('stop');
+      message.textContent = 'Hermes stopped. Choose Hermes Mode or Restart Hermes to start it again.';
+    }],
+    ['odysseus_restart', 'Restart Odysseus', async () => {
+      if (!window.confirm('Restart Odysseus? This page reloads when it is back, and any chat still streaming here is interrupted.')) return;
+      const { response, result } = await post(`${endpoint}/odysseus/restart`);
+      if (!response.ok) throw new Error(result.detail || 'Odysseus could not restart itself.');
+      message.textContent = 'Odysseus is restarting…';
+      await waitForOdysseus(message);
+    }],
+  ].filter(([key]) => available[key]);
+  if (!actions.length) return null;
+  const menu = document.createElement('details');
+  menu.id = 'application-mode-services';
+  menu.className = 'application-mode-services';
+  const summary = document.createElement('summary');
+  summary.textContent = 'Services';
+  summary.title = 'Restart or stop the local Hermes and Odysseus services';
+  const list = document.createElement('div');
+  list.className = 'application-mode-service-list';
+  for (const [, label, run] of actions) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = label;
+    button.addEventListener('click', async () => {
+      for (const other of list.querySelectorAll('button')) other.disabled = true;
+      try { await run(); }
+      catch (error) { message.textContent = error.name === 'TimeoutError' ? 'The request timed out; check the service state before retrying.' : error.message; }
+      finally { for (const other of list.querySelectorAll('button')) other.disabled = false; }
+    });
+    list.append(button);
+  }
+  menu.append(summary, list);
+  return menu;
+}
+
 function hermesURL(value) {
   const url = new URL(value);
   if (url.protocol !== 'http:' || url.hostname !== '127.0.0.1' || !url.port || url.pathname !== '/' || url.search || url.hash || url.username || url.password) {
@@ -111,7 +208,8 @@ async function initialize() {
   providers.style.cssText = 'margin-left:8px;color:inherit';
   const rememberPage = () => { providers.href = '/static/provider-sync.html?return=' + encodeURIComponent(location.pathname + location.search + location.hash); };
   for (const type of ['pointerenter', 'focus', 'click', 'auxclick']) providers.addEventListener(type, rememberPage);
-  bar.append(selector, providers, message);
+  const services = serviceMenu(status, message);
+  bar.append(selector, providers, ...(services ? [services] : []), message);
   document.querySelector('#chat-container').prepend(bar);
   try { await restoreChatState(message); }
   catch (_) { message.textContent = 'The saved draft could not be restored. Your current composer was not changed.'; }

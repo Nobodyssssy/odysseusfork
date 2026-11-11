@@ -7,6 +7,7 @@ from pathlib import Path
 import socket
 import subprocess
 import threading
+import time
 from urllib.parse import urlsplit
 
 
@@ -108,6 +109,58 @@ class ModeService:
                 )
             return {**current, 'state': 'starting'}
 
+    def _identity(self):
+        """Hermes's /health payload when the configured port answers as Hermes, else None."""
+        connection = http.client.HTTPConnection('127.0.0.1', urlsplit(self.config.url).port, timeout=2)
+        try:
+            connection.request('GET', '/health')
+            body = connection.getresponse().read(65537)
+            health = json.loads(body) if len(body) <= 65536 else None
+        except (OSError, http.client.HTTPException, ValueError):
+            return None
+        finally:
+            connection.close()
+        ok = isinstance(health, dict) and isinstance(health.get('sessions'), int) and isinstance(health.get('server_started_at'), (int, float))
+        return health if ok else None
+
+    def can_start(self):
+        return bool(self.config and self.config.command and self.config.log_dir)
+
+    def stop(self, force=False):
+        """Stop Hermes only when the port answers as Hermes; refuse while runs are active unless ``force``."""
+        from src import service_controls as controls
+        with self._lock:
+            if self.error or not self.config:
+                raise RuntimeError('Hermes is not configured here.')
+            if not controls.supported():
+                raise controls.Unavailable('Stopping Hermes from Odysseus is only supported on Windows.')
+            port = urlsplit(self.config.url).port
+            health = self._identity()
+            if health is None:
+                if not _port_is_free(port):
+                    raise RuntimeError('Something other than Hermes is using the Hermes port; nothing was stopped.')
+            else:
+                runs = health.get('active_runs') or 0
+                if runs and not force:
+                    raise controls.ActiveRuns(runs)
+                controls.stop_hermes_listener(port)
+                deadline = time.monotonic() + 20
+                while not _port_is_free(port) and time.monotonic() < deadline:
+                    time.sleep(0.25)
+                if not _port_is_free(port):
+                    raise RuntimeError('Hermes did not release its port; check it manually.')
+            if self._process is not None and self._process.poll() is None:
+                controls.kill_tree(self._process.pid)
+            self._process = None
+            return self.status()
+
+    def restart(self, force=False):
+        if not self.can_start():
+            from src import service_controls as controls
+            raise controls.Unavailable('Optional Hermes startup is not configured, so it could not be started again.')
+        self.stop(force)
+        return self.start()
+
     def status(self):
         if self.error:
             return {'enabled': True, 'state': 'unavailable', 'error': self.error}
@@ -169,13 +222,47 @@ def require_browser_admin(request):
 def make_router(service):
     from fastapi import APIRouter, HTTPException, Request
 
+    from fastapi.responses import JSONResponse
+    from src import service_controls as controls
+
     router = APIRouter(prefix='/api/application-modes', tags=['application-modes'])
     local_only = require_local
+
+    def guarded(action):
+        """Run a service-control action and map its failures to recoverable HTTP answers."""
+        try:
+            return action()
+        except controls.ActiveRuns as exc:
+            return JSONResponse(status_code=409, content={'detail': str(exc), 'active_runs': exc.count, 'force_required': True})
+        except controls.Unavailable as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except OSError as exc:
+            raise HTTPException(503, 'The action failed; nothing further was attempted') from exc
 
     @router.get('')
     def status(request: Request):
         local_only(request)
-        return service.status()
+        result = service.status()
+        if isinstance(result, dict) and result.get('enabled'):
+            result = {**result, 'controls': controls.availability(getattr(service, 'can_start', lambda: False)() is True)}
+        return result
+
+    @router.post('/hermes/stop')
+    def stop(request: Request, force: bool = False):
+        require_browser_admin(request)
+        return guarded(lambda: service.stop(force=force))
+
+    @router.post('/hermes/restart')
+    def restart(request: Request, force: bool = False):
+        require_browser_admin(request)
+        return guarded(lambda: service.restart(force=force))
+
+    @router.post('/odysseus/restart')
+    def restart_odysseus(request: Request):
+        require_browser_admin(request)
+        return guarded(lambda: {key: value for key, value in controls.schedule_odysseus_restart().items() if key != 'helper'})
 
     @router.post('/hermes/start')
     def start(request: Request):

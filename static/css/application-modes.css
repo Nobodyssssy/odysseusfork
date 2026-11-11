@@ -25,6 +25,16 @@
   border-radius: 7px;
 }
 .application-mode-bar select:focus-visible { outline: 2px solid var(--red, #e06c75); }
+.application-mode-services { display: inline-block; margin-left: 8px; vertical-align: middle; }
+.application-mode-services > summary { cursor: pointer; padding: 6px 8px; border: 1px solid var(--border, #444); border-radius: 7px; background: var(--panel, #282c34); color: var(--fg, #eee); list-style: none; user-select: none; }
+.application-mode-services > summary::-webkit-details-marker { display: none; }
+.application-mode-services[open] > summary { border-bottom-left-radius: 0; border-bottom-right-radius: 0; }
+.application-mode-service-list { position: absolute; right: 0; margin-top: -1px; min-width: 170px; display: flex; flex-direction: column; border: 1px solid var(--border, #444); border-radius: 7px 0 7px 7px; background: var(--panel, #282c34); overflow: hidden; }
+.application-mode-service-list button { padding: 8px 10px; border: 0; border-bottom: 1px solid var(--border, #444); background: transparent; color: var(--fg, #eee); font: inherit; text-align: left; cursor: pointer; }
+.application-mode-service-list button:last-child { border-bottom: 0; }
+.application-mode-service-list button:hover:not(:disabled), .application-mode-service-list button:focus-visible { background: var(--hover, rgba(127, 127, 127, 0.2)); outline: none; }
+.application-mode-service-list button:disabled { opacity: 0.5; cursor: progress; }
+.application-mode-services > summary:focus-visible { outline: 2px solid var(--red, #e06c75); }
 @media (max-width: 600px) {
   .application-mode-bar select { max-width: 130px; }
   .application-mode-bar ~ .chat-top-bar { margin-top: 0; }
