@@ -98,7 +98,7 @@ print(json.dumps({'cwd':p.cwd(),'paths':{k:e[k] for k in keys if k in e}}))
     webui = Path(webui or environment.get('ODYSSEUS_HERMES_REPO') or root.parent / 'hermes-webui')
     if not (webui / 'server.py').is_file():
         return None
-    plan = plan_existing(webui, agent, home, runtime, pins, state_dir)
+    plan = plan_existing(webui, agent, home, runtime, pins, state_dir, application_root=root)
     if extension_dir:
         plan['extension_dir'] = extension_dir
     return plan

@@ -57,7 +57,8 @@ def patch_state(path, patch):
         return 'absent'
     if patch and _git(path, *_PATCH_FLAGS, '-R', '--check', str(patch), check=False).returncode == 0:
         changed = {line.strip() for line in _git(path, 'diff', '--name-only').stdout.splitlines()}
-        if changed <= _patch_files(patch):
+        untracked = {line.strip() for line in _git(path, 'ls-files', '--others', '--exclude-standard').stdout.splitlines() if line.strip()}
+        if changed <= _patch_files(patch) and untracked <= _patch_files(patch):
             return 'applied'
     return 'foreign'
 
@@ -194,10 +195,10 @@ def probe_python(python, require_agent=False):
         raise ComponentError('Python is missing, unsupported or lacks Hermes dependencies; run component repair.') from exc
 
 
-def plan_existing(webui, agent, home, python, pins, state_dir=None):
+def plan_existing(webui, agent, home, python, pins, state_dir=None, application_root=None):
     webui, agent, home = (Path(value).resolve() for value in (webui, agent, home))
     for name, path in [('webui', webui), ('agent', agent)]:
-        verify_checkout(path, pins[name])
+        verify_checkout(path, pins[name], patch_file(application_root, name) if application_root else None)
     if not (webui / 'server.py').is_file() or not (agent / 'run_agent.py').is_file():
         raise ComponentError('Existing Hermes layout is incomplete; it was not modified.')
     probe_python(python, require_agent=True)

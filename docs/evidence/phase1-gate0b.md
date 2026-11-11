@@ -124,7 +124,7 @@ Through the proxy (`http://hermes.localhost:7000`), 4 shapes each (no headers + 
 | /api/approval/respond | 401 | 401 | 401 | 401 |
 
 FAIL list (any 400/422/other = reached a handler): **none**. Direct 8787 control (approve, revoke, block, terminal/start x4 shapes): all 401.
-Rebinding shape (`Host`+`Origin` = evil.test, `Sec-Fetch-Site: same-origin`): direct 8787 approve/terminal/chat -> 401; sent to the proxy port with an evil Host (not routed to Hermes) approve/terminal -> 401.
+Rebinding shape (`Host`+`Origin` = evil.test, `Sec-Fetch-Site: same-origin`): direct 8787 approve/terminal/chat -> 401; sent to the PROXY PORT (127.0.0.1:7000) with an evil Host, the request was ROUTED TO ODYSSEUS (the Host does not match `hermes.localhost:7000`), and Odysseus's own auth middleware returned 401. The proxy did not reject it and Hermes never saw it.
 No valid approval and no real command was sent.
 
 CSRF token for an unauthenticated client [live]: `GET /` -> 302 (empty body), `/login` 200 (2684 B), `/api/auth/status` 200, `/health` 200, `/api/auth/csrf` 401, `/api/csrf` 401.
@@ -142,3 +142,61 @@ PasswordOff.test_without_a_password_the_same_request_is_not_refused... ok       
 Ran 4 tests in 3.868s  OK
 ```
 The route list is parsed from `api/routes.py` with `ast`, so a newly added state-changing route is covered automatically. Nothing was changed to break CLI/MCP.
+
+## 10. Process rule: `git status --porcelain` on the pinned WebUI (F:\hermes-webui) around this task
+BEFORE and AFTER (captured with the system git, compared with `diff`: IDENTICAL):
+```
+ M api/routes.py
+ M server.py
+ M static/index.html
+?? api/trusted_workspaces.py
+?? api/windows_console.py
+?? static/trusted-workspaces.js
+?? tests/test_trusted_workspaces_prompts.py
+?? tests/test_windows_console.py
+```
+Live diff sha256 `e9bdf4c1c167` == reviewed patch sha256 `e9bdf4c1c167` (still exactly pin + reviewed patch, no stray files).
+Correction: an earlier draft of this section said "Identical: False" because the Python step could not find the BEFORE snapshot saved by the shell; that was a bookkeeping error, the comparison above is the real one.
+The `csrf_matrix.py` / `tw_matrix.py` probes from the previous turn were written INSIDE the tree by mistake and deleted; since then every probe runs from scratch (`%TEMP%`), including the invariant test (`HERMES_WEBUI_ROOT` points at the tree, nothing is copied into it).
+
+## 11. Q1 - plan/adoption fix (src/hermes_component.py, src/hermes_component_runtime.py)
+Bug (code): `plan_existing()` called `verify_checkout(path, pin)` WITHOUT the patch that `serve`/`validate` pass, so a correctly patched adopted WebUI always read as "differs from the reviewed pin".
+Fix: `plan_existing(..., application_root=None)` passes `patch_file(application_root, name)`; `discover_existing` passes its root. The acceptance predicate was NOT loosened.
+Gap found while testing (tightened): `patch_state()` ignored untracked files, so pin + patch + a stray `csrf_matrix.py` read as `applied` (test failed with `'applied' != 'foreign'`). It now also requires every untracked, non-ignored file to be one of the patch's own files.
+[sim, real clone of nesquena/hermes-webui at the pin] `tests/application_modes/test_component_plan_patch.py` (RED first: TypeError + the untracked case), now 10 passed:
+- pin + reviewed patch -> MATCHING; clean pin -> accepted exactly as before; same patched tree planned WITHOUT the patch -> DIFFERS (the old bug, kept as a test)
+- extra tracked edit -> DIFFERS; stray untracked file (top level and in a new folder) -> DIFFERS; deleted patch file -> DIFFERS; one patched file reverted (partial patch) -> DIFFERS; wrong revision -> DIFFERS; ignored `__pycache__` -> still MATCHING
+Related suites: `test_component_patch.py`, `test_component_runtime.py`, `test_component_cli.py` pass. `test_component.py::test_explicit_enable_restores_saved_component_without_reinstalling` FAILS (`KeyError: 'agent'`, hermes_component.py:346) **identically on untouched `release/hermes-mode-windows`** (checked in a throwaway worktree): pre-existing, not caused by this change.
+[live, read-only] `hermes-component.py plan` now returns `{"existing": {... "origin": "external", "webui": "F:\\hermes-webui" ...}}` instead of "Hermes source differs from the reviewed pin".
+Interpretation note: "pin only (no patch) must FAIL" was implemented as "a patched tree verified without the patch fails"; a CLEAN pin tree is still accepted (today's behaviour; `maintain` then applies the patch). "Patch reverse-applied" was implemented as a partly reverted patch. Say if you meant otherwise.
+
+## 12. GET invariant (integrations/hermes-mode/patches/test_webui_auth_invariant.py)
+Now also covers every URL-path literal in every `handle_*`/`_handle_*` function of api/routes.py, GET included, with an explicit hard-coded public allowlist
+(`/health`, `/api/auth/status`, `/login`, `/favicon.ico`, `/sw.js`, the login-flow/OIDC/passkey paths, manifests, `/share`, prefixes `/static/`, `/session/static/`, `/share/`, `/api/share/` minus create/revoke) and a test that `auth.PUBLIC_PATHS` equals that list exactly.
+[sim, real pinned code, run from scratch] 6 tests OK: 145 write-route paths and 270 handler paths (GET included) x 5 header shapes each; no credential-less request reaches anything outside the allowlist.
+Mutation check (negative control): adding `/api/sessions` and `/api/terminal/output` to `PUBLIC_PATHS` makes 2 tests FAIL (`test_every_get_and_other_route_refuses_unless_explicitly_public`, `test_the_set_of_public_paths_is_exactly_the_reviewed_one`).
+Known gap: `/health` is public by design and returns active run counts and model names (seen live). Gating that detail is pending (WebUI change, see ownership below).
+
+## 13. Ownership of F:\hermes-webui
+`C:\Users\Protagonist\AppData\Local\Odysseus\hermes\managed\component.json`: `"origin": "external"`, `"webui": "F:\\hermes-webui"`, `"agent": "C:\\Users\\Protagonist\\AppData\\Local\\hermes\\hermes-agent"`, `"extension_dir"` present. A managed install would have `"origin": "managed"` and a path under a generation folder (hermes_component.py:398).
+=> **ADOPTED / USER-OWNED.** The "report, don't modify" rule applies to any further change inside F:\hermes-webui (Host allowlist, `/health` detail gating, rebinding the file-safety chokepoint from the WebUI hook). Not touched.
+
+## 14. Approval mode (read-only findings, nothing changed)
+- Effective `approvals.mode` = `smart`. Source: `hermes_cli/config_defaults.py:1657` (`"mode": "smart"`); the live config.yaml has no `approvals:` block, so the default applies. (The code fallback in `approval_context._get_approval_mode` is `manual`, but the merged default wins.)
+- Not a WebUI toggle: no Settings control (grep of static/ and api/), and `/api/commands/exec` only allows `reload-mcp`, `reload-skills`, `codex-runtime`, `credits` (api/commands.py:31), so `/approvals` cannot be run from the WebUI chat. Where it can be set: `approvals: {mode: manual}` in config.yaml; `hermes config set approvals.mode manual` (user's own terminal); `/approvals manual` in the Hermes CLI/TUI; the separate Hermes dashboard config editor (hermes_cli/web_routers/config_env.py).
+- **`manual` is not ask-by-default.** tools/approval.py:1310-1330: a prompt appears only when `_command_findings(command)` returns a pattern hit; otherwise `_approved_with_provenance`. The real detector missed `Set-Content`, `echo > D:/...`, `git push origin main`, `curl -X POST -d @file`, `copy secrets.txt D:\leak\` (phase1-gate0.md / earlier probe). Setting `manual` alone will not make those prompt.
+- **Permanent allowlist in the live config.yaml** (`command_allowlist`): `Windows PowerShell destructive delete (later in the script)`, `delete in root path`, `execute_code`, `recursive delete`. `command_allowlist` entries bypass the gate in every mode (approval.py:1296 `_command_matches_permanent_allowlist` runs before the prompt). So `execute_code` never asks today, and neither do recursive/root deletes.
+- Existing official extension point: a plugin `pre_tool_call` hook may return `{"action": "approve"}` to route ANY tool call (terminal, execute_code) to the same human gate via `request_tool_approval()` (approval.py:1245), or `{"action": "block"}`; its rule keys are namespaced so the user's existing allowlist entries do not match it. A user-level plugin lives outside both pinned trees. Not yet built.
+- `approvals.deny` (config) is a glob deny list that blocks even under YOLO; it is pattern matching and must not be described as security.
+
+## 15. Provider sync regression (known P1, caused by the Hermes password)
+Cause: `fetch_hermes_providers` does an unauthenticated `GET /api/providers` (provider_adapters.py:153) -> 401 -> state `requires_authentication` -> the Hermes side is treated as EMPTY (`he = []`, provider_sync.py:47).
+[live] `GET 127.0.0.1:8787/api/providers` -> 401.
+What fails: (1) listing Hermes providers: banner "Hermes asks for a login, so its providers cannot be read here." (provider-sync.js:160), Hermes columns empty; (2) Odysseus->Hermes apply: blocked at provider_sync.py:131 with the message "Hermes is not reachable, so nothing was written." (inaccurate wording: it is a login wall, not an outage); (3) Hermes->Odysseus apply: the source is not found in the empty list -> "unknown provider"; (4) copy-key: needs the Hermes entry from the same list -> fails with "unknown, login-based, or Hermes does not keep its key in its .env file" (misleading wording). Nothing is half-written: every path fails closed before writing.
+What still works: Odysseus-side providers are listed and used; Hermes's `.env` and `config.yaml` are read from disk (not via HTTP) only after a provider is found, so they are not reached.
+Not done on purpose: storing the Hermes password. Proposed later item (P1): a scoped read-only token for exactly `GET /api/providers`, minted by Hermes, readable only by Odysseus, never a login credential.
+Also proposed: make the two error messages say "Hermes requires a login" when the state is `requires_authentication`.
+
+## 16. Session lifetime (read-only)
+Controlled by `_resolve_session_ttl()` (api/auth.py:32): env `HERMES_WEBUI_SESSION_TTL` (60 s..1 year) > settings.json `session_ttl_seconds` > default `SESSION_TTL` = 30 days. Neither the env var (user env, launcher file names checked; the live process environment was not read) nor `session_ttl_seconds` (settings.json keys listed) is set => **effective lifetime is the 30-day default**. Cookie `Max-Age` is the same value; sessions persist in `STATE_DIR/.sessions.json`.
+Tradeoff: that file is readable by any process running as you, so a LONGER lifetime lengthens the window in which a stolen session is usable; a SHORTER one (e.g. 12 h) shrinks the window at the cost of more logins. No change proposed.
