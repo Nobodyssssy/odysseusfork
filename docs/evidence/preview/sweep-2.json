@@ -1,0 +1,30 @@
+[
+ {
+  "area": "Open settings",
+  "clicked": true,
+  "chars": 880,
+  "errors": [],
+  "shot": "12-settings"
+ },
+ {
+  "area": "Bots tab",
+  "clicked": false,
+  "chars": 362,
+  "errors": [],
+  "shot": "13-bots"
+ },
+ {
+  "area": "Right sidebar",
+  "clicked": true,
+  "chars": 378,
+  "errors": [],
+  "shot": "14-right-sidebar"
+ },
+ {
+  "area": "Layout editor",
+  "clicked": true,
+  "chars": 885,
+  "errors": [],
+  "shot": "15-layout-editor"
+ }
+]

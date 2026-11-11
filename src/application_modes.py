@@ -17,12 +17,38 @@ class ModeConfig:
     command: tuple[str, ...] = ()
     environment: dict[str, str] | None = None
     log_dir: Path | None = None
+    backend: str = 'webui'
+    launcher: tuple[str, ...] = ()
+    launcher_cwd: Path | None = None
+
+    @classmethod
+    def gateway_from_environment(cls, source):
+        """The official Hermes Gateway/Webapp, started and stopped outside Odysseus.
+
+        ODYSSEUS_HERMES_MODE_URL       exact http://127.0.0.1:PORT/ of the Webapp listener
+        ODYSSEUS_HERMES_GATEWAY_HOME   the Hermes home whose gateway serves it (same OS user)
+        ODYSSEUS_HERMES_GATEWAY_PYTHON the Hermes interpreter, used only to ask the gateway for a one-use launch link
+        ODYSSEUS_HERMES_GATEWAY_AGENT_DIR  the Hermes agent checkout that interpreter imports hermes_cli from"""
+        url, home = source.get('ODYSSEUS_HERMES_MODE_URL'), source.get('ODYSSEUS_HERMES_GATEWAY_HOME')
+        python, agent = source.get('ODYSSEUS_HERMES_GATEWAY_PYTHON'), source.get('ODYSSEUS_HERMES_GATEWAY_AGENT_DIR')
+        if not (url and home and python and agent):
+            raise ValueError('The gateway backend needs ODYSSEUS_HERMES_MODE_URL, _GATEWAY_HOME, _GATEWAY_PYTHON and _GATEWAY_AGENT_DIR')
+        if not (Path(home).is_dir() and Path(python).is_file() and Path(agent).is_dir()):
+            raise ValueError('A configured gateway path does not exist')
+        from src.runtime_paths import get_app_root
+        child_env = {key: value for key, value in source.items() if key not in ('PYTHONPATH', 'PYTHONHOME') and not key.startswith('ODYSSEUS_')}
+        child_env['HERMES_HOME'] = str(Path(home))
+        child_env['PYTHONPATH'] = str(Path(agent))
+        command = (python, '-B', str(Path(get_app_root()) / 'scripts/hermes-webapp-launch.py'), '--home', str(Path(home)))
+        return cls(url=url, environment=child_env, backend='gateway', launcher=command, launcher_cwd=Path(agent))
 
     @classmethod
     def from_environment(cls, environment=None):
         source = os.environ if environment is None else environment
         if source.get('ODYSSEUS_HERMES_DISABLED') == '1':
             return None
+        if source.get('ODYSSEUS_HERMES_BACKEND') == 'gateway':
+            return cls.gateway_from_environment(source)
         from src.hermes_component import read_config
         from src.runtime_paths import get_app_root, get_hermes_component_root
         root = get_hermes_component_root(source)
@@ -65,6 +91,28 @@ class ModeConfig:
         parsed = urlsplit(self.url)
         if not parsed.port or self.url != f'http://127.0.0.1:{parsed.port}/':
             raise ValueError('Hermes mode requires an exact http://127.0.0.1:PORT/ URL')
+
+
+PROJECTS_HOST = 'hermes.localhost'
+_LAUNCH_TIMEOUT = 20
+
+
+def browser_launch_url(raw, gateway_url, browser_port):
+    """The launch link as the browser must open it: always http://hermes.localhost:<Odysseus port>/..., never the
+    gateway's own address. Anything that is not the configured gateway (or already that browser address) is refused,
+    so a faulty launcher can never turn this route into an open redirect."""
+    if not isinstance(raw, str) or len(raw) > 4096 or any(ord(c) < 33 or ord(c) > 126 for c in raw):
+        raise RuntimeError('The Webapp returned an unusable launch link')
+    parts = urlsplit(raw)
+    try:
+        port = parts.port
+    except ValueError:
+        port = None
+    gateway = urlsplit(gateway_url)
+    ours = parts.hostname == '127.0.0.1' and port == gateway.port or parts.hostname == PROJECTS_HOST and port == browser_port
+    if parts.scheme != 'http' or parts.username or parts.password or not ours or not browser_port:
+        raise RuntimeError('The Webapp returned a launch link for another address')
+    return f"http://{PROJECTS_HOST}:{browser_port}{parts.path or '/'}" + (f'?{parts.query}' if parts.query else '') + (f'#{parts.fragment}' if parts.fragment else '')
 
 
 def _port_is_free(port):
@@ -126,12 +174,58 @@ class ModeService:
     def can_start(self):
         return bool(self.config and self.config.command and self.config.log_dir)
 
+    def _gateway_status(self, result, port):
+        """The official Webapp: /api/health is public and says whether its sign-in gate is engaged."""
+        connection = http.client.HTTPConnection('127.0.0.1', port, timeout=2)
+        try:
+            connection.request('GET', '/api/health')
+            response = connection.getresponse()
+            body = response.read(65537)
+            try:
+                health = json.loads(body) if len(body) <= 65536 else None
+            except ValueError:
+                health = None
+            identity = isinstance(health, dict) and health.get('ok') is True and isinstance(health.get('auth_required'), bool) and 'displayVersion' in health
+            result['state'] = 'ready' if identity and response.status == 200 else ('unavailable' if identity else 'conflict')
+            if identity:
+                result['sign_in_gate'] = health['auth_required']
+        except (OSError, http.client.HTTPException, ValueError):
+            result['state'] = 'stopped' if _port_is_free(port) else 'unavailable'
+        finally:
+            connection.close()
+        return result
+
+    def launch(self, browser_port):
+        """Ask the running gateway for a one-use sign-in link and return it as the browser must open it.
+
+        The link is a credential: it is never logged, stored or put in an error message here."""
+        if not self.config or self.config.backend != 'gateway' or not self.config.launcher:
+            raise RuntimeError('Projects mode is not configured')
+        if self.status().get('state') != 'ready':
+            raise RuntimeError('The official Hermes Webapp is not running; start it first')
+        flags = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
+        try:
+            done = subprocess.run(list(self.config.launcher), cwd=self.config.launcher_cwd, env=self.config.environment, stdin=subprocess.DEVNULL,
+                                  capture_output=True, text=True, timeout=_LAUNCH_TIMEOUT, creationflags=flags)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise RuntimeError('The Webapp did not answer the launch request') from exc
+        try:
+            answer = json.loads(done.stdout.strip().splitlines()[-1])
+        except (IndexError, ValueError):
+            answer = None
+        if done.returncode != 0 or not isinstance(answer, dict) or answer.get('ok') is not True:
+            reason = answer.get('error') if isinstance(answer, dict) and isinstance(answer.get('error'), str) else 'the launch helper failed'
+            raise RuntimeError('The Webapp refused the launch request: ' + reason[:200])
+        return browser_launch_url(answer.get('url'), self.config.url, browser_port)
+
     def stop(self, force=False):
         """Stop Hermes only when the port answers as Hermes; refuse while runs are active unless ``force``."""
         from src import service_controls as controls
         with self._lock:
             if self.error or not self.config:
                 raise RuntimeError('Hermes is not configured here.')
+            if self.config.backend == 'gateway':
+                raise controls.Unavailable('The official Hermes gateway is managed outside Odysseus; stop it there.')
             if not controls.supported():
                 raise controls.Unavailable('Stopping Hermes from Odysseus is only supported on Windows.')
             port = urlsplit(self.config.url).port
@@ -167,10 +261,12 @@ class ModeService:
         if self.config is None:
             return {'enabled': False}
         port = urlsplit(self.config.url).port
-        result = {'enabled': True, 'url': self.config.url, 'owned': False}
+        result = {'enabled': True, 'url': self.config.url, 'owned': False, 'backend': self.config.backend}
         if self.proxy:
             from src.hermes_proxy import hostname_resolves
             result['proxy'] = hostname_resolves()
+        if self.config.backend == 'gateway':
+            return self._gateway_status(result, port)
         connection = http.client.HTTPConnection('127.0.0.1', port, timeout=2)
         try:
             connection.request('GET', '/health')
@@ -246,8 +342,22 @@ def make_router(service):
         local_only(request)
         result = service.status()
         if isinstance(result, dict) and result.get('enabled'):
-            result = {**result, 'controls': controls.availability(getattr(service, 'can_start', lambda: False)() is True)}
+            available = controls.availability(getattr(service, 'can_start', lambda: False)() is True)
+            if result.get('backend') == 'gateway':
+                available = {**available, 'hermes_stop': False, 'hermes_restart': False}
+            result = {**result, 'controls': available}
         return result
+
+    @router.post('/projects/launch')
+    def projects_launch(request: Request):
+        """Mint the one-use Webapp sign-in link for an authenticated Odysseus administrator in this browser."""
+        require_browser_admin(request)
+        port = request.url.port
+        try:
+            url = service.launch(port)
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return JSONResponse({'url': url}, headers={'Cache-Control': 'no-store', 'Pragma': 'no-cache', 'Referrer-Policy': 'no-referrer'})
 
     @router.post('/hermes/stop')
     def stop(request: Request, force: bool = False):

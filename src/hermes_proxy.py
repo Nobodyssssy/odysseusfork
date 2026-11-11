@@ -54,7 +54,30 @@ _LABEL = r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?'
 _NAME = re.compile(rf'^(?:{_LABEL}\.)*localhost$')
 _ORIGIN = re.compile(rf'^https?://(?:{_LABEL}\.)*{_LABEL}(?::[0-9]{{1,5}})?$')
 _RESERVED_CLOSE = {1005, 1006, 1015}
+_SECRET_QUERY = re.compile(r'([?&](?:token|ticket|access_token|session_token|code|launch)=)[^&\s"\']+', re.I)
 log = logging.getLogger('odysseus.hermes_proxy')
+
+
+class RedactSecrets(logging.Filter):
+    """Blank credential-looking query parameters in log lines. httpx and uvicorn log full request URLs at INFO, and a
+    one-use ticket or session token must not outlive its use in a log file."""
+
+    def filter(self, record):
+        try:
+            if isinstance(record.msg, str):
+                record.msg = _SECRET_QUERY.sub(r'\1[redacted]', record.msg)
+            if isinstance(record.args, tuple):
+                record.args = tuple(_SECRET_QUERY.sub(r'\1[redacted]', arg) if isinstance(arg, str) else arg for arg in record.args)
+        except Exception:                      # a logging helper must never break the request being logged
+            pass
+        return True
+
+
+def redact_request_logs():
+    for name in ('httpx', 'uvicorn.access'):
+        target = logging.getLogger(name)
+        if not any(isinstance(item, RedactSecrets) for item in target.filters):
+            target.addFilter(RedactSecrets())
 
 
 class ProxyConfigError(ValueError):
@@ -73,6 +96,7 @@ class ProxyPolicy:
     allow_missing_origin_http: bool = True       # plain navigations and curl-style clients send none
     allow_missing_origin_ws: bool = False        # browsers always send one; a native client should dial the gateway itself
     ws_max_bytes: int = DEFAULT_WS_MAX_MB * 1024 * 1024
+    pass_host: bool = False                      # False: present the gateway's own authority upstream; True: the browser's Host/Origin
 
     def hosts(self, port):
         accepted = {f'{name}:{port}' for name in self.names}
@@ -88,7 +112,11 @@ class ProxyPolicy:
         """ODYSSEUS_HERMES_PROXY_HOSTNAMES        extra names, each ``localhost`` or ``*.localhost`` (browsers resolve them to loopback)
            ODYSSEUS_HERMES_PROXY_ORIGINS          extra exact origins, e.g. ``http://projects.localhost:7000``
            ODYSSEUS_HERMES_PROXY_WS_NO_ORIGIN=1   accept WebSocket upgrades that carry no Origin header
-           ODYSSEUS_HERMES_PROXY_WS_MAX_MB        largest single WebSocket frame, 1-1024 (default 400)"""
+           ODYSSEUS_HERMES_PROXY_WS_MAX_MB        largest single WebSocket frame, 1-1024 (default 400)
+           ODYSSEUS_HERMES_PROXY_UPSTREAM_HOST    ``bound`` (default): present the gateway's own 127.0.0.1:PORT as Host/Origin; use with
+                                                  webapp.public_url unset. ``public``: pass the browser's Host/Origin/Referer through
+                                                  unchanged; required when the gateway's sign-in gate is on, because it then insists on
+                                                  the real origin (webapp.public_url must be http://hermes.localhost:<Odysseus port>)"""
         names = {PROXY_HOST}
         for name in _csv(environment.get('ODYSSEUS_HERMES_PROXY_HOSTNAMES')):
             if not _NAME.match(name) or len(name) > 253:
@@ -102,9 +130,12 @@ class ProxyPolicy:
         megabytes = environment.get('ODYSSEUS_HERMES_PROXY_WS_MAX_MB') or str(DEFAULT_WS_MAX_MB)
         if not megabytes.isdigit() or not 1 <= int(megabytes) <= 1024:
             raise ProxyConfigError('ODYSSEUS_HERMES_PROXY_WS_MAX_MB must be a whole number from 1 to 1024')
+        upstream_host = environment.get('ODYSSEUS_HERMES_PROXY_UPSTREAM_HOST') or 'bound'
+        if upstream_host not in ('bound', 'public'):
+            raise ProxyConfigError("ODYSSEUS_HERMES_PROXY_UPSTREAM_HOST must be 'bound' or 'public'")
         return cls(names=frozenset(names), extra_origins=frozenset(origins),
                    allow_missing_origin_ws=environment.get('ODYSSEUS_HERMES_PROXY_WS_NO_ORIGIN') == '1',
-                   ws_max_bytes=int(megabytes) * 1024 * 1024)
+                   ws_max_bytes=int(megabytes) * 1024 * 1024, pass_host=upstream_host == 'public')
 
 
 UVICORN_DEFAULT_WS_MAX = 16 * 1024 * 1024
@@ -261,8 +292,9 @@ class HermesHostProxy:
         await send({'type': 'http.response.body', 'body': message})
 
     def _toward_upstream(self, scope, headers):
-        """gateway mode: present the gateway's own bound authority (the browser's values were already validated)."""
-        if self.mode != 'gateway':
+        """gateway mode: present the gateway's own bound authority (the browser's values were already validated).
+        With pass_host the gateway sees the browser's own Host/Origin/Referer, so its own checks judge the real values."""
+        if self.mode != 'gateway' or self.policy.pass_host:
             return headers
         own = ('http://' + self._host(scope)).encode()
         rewritten = []
@@ -368,12 +400,16 @@ class HermesHostProxy:
             target += '?' + scope['query_string'].decode('latin-1')
         forwarded = [(n.decode('latin-1'), v.decode('latin-1')) for n, v in scope['headers']
                      if n not in _WS_HANDSHAKE and n not in _HOP_BY_HOP]
-        has_origin = any(n == b'origin' for n, _ in scope['headers'])
+        browser_origin = next((v.decode('latin-1') for n, v in scope['headers'] if n == b'origin'), None)
+        if self.policy.pass_host:
+            authority, origin, where = self._host(scope), browser_origin, {'host': '127.0.0.1', 'port': int(self.authority.rsplit(':', 1)[1])}
+        else:
+            authority, origin, where = self.authority, (self.upstream if browser_origin is not None else None), {}
         try:
             upstream = await connect(
-                f'ws://{self.authority}{target}', additional_headers=forwarded, origin=self.upstream if has_origin else None,
+                f'ws://{authority}{target}', additional_headers=forwarded, origin=origin,
                 subprotocols=scope.get('subprotocols') or None, compression=None, max_size=self.policy.ws_max_bytes,
-                ping_interval=None, open_timeout=10, close_timeout=5, user_agent_header=None)
+                ping_interval=None, open_timeout=10, close_timeout=5, user_agent_header=None, **where)
         except errors.InvalidStatus as exc:
             body = (exc.response.body or b'')[:2000] or b'Hermes refused the connection.'
             return await self._ws_refuse(scope, send, exc.response.status_code, body)
@@ -463,5 +499,7 @@ def install_hermes_proxy(app, service, environment=None):
         log.error('Hermes proxy not installed: %s', exc)
         return False
     app.add_middleware(HermesHostProxy, upstream=service.config.url, mode=mode, policy=policy)
+    if mode == 'gateway':
+        redact_request_logs()
     service.proxy = True
     return True

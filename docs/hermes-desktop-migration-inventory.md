@@ -125,3 +125,12 @@ Candidates, in order of how likely they are to need a fork rather than an upstre
 - Hermes: restore `config.yaml` from `F:\Odysseus-Backups\config-backups\` (a backup exists from before the allowlist cleanup); disable the plugin by removing `odysseus-ask-policy` from `plugins.enabled` (reverts to upstream behaviour: shown repeatedly in the lab).
 - Data: the verified snapshot `F:\Odysseus-Backups\snapshot-20261111-130449-db3827` and `scripts/odysseus-backup.py restore` (dry run first; an isolated real restore is still to be rehearsed).
 - The old WebUI checkout, pin and reviewed patch stay untouched until the rollback has been rehearsed in the lab.
+
+## 15. Preview result (2026-11-11)
+
+The official Webapp runs behind the real Odysseus application in a disposable preview: Personal | Projects switching, a Desktop-plugin return control,
+authenticated one-use launch, WebSocket chat with streaming and Stop, approval cards, and the Webapp's sign-in gate with Host/Origin pass-through.
+Details, evidence and the remaining blockers: `docs/hermes-webapp-preview.md`, `docs/hermes-webapp-proxy.md`, `docs/evidence/preview/`.
+Corrections to earlier sections: the old-WebUI return button is replaced by `desktop-plugins/odysseus-return`; with the gate on the Webapp needs
+`ODYSSEUS_HERMES_PROXY_UPSTREAM_HOST=public` and `webapp.public_url = http://hermes.localhost:<port>`; section 5's "unverified how `public_url` and the one-use link
+interact" is answered: with the gate on, the launch link lands on the Sign-in page and does not bypass it.

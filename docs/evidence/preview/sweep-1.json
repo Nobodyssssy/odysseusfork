@@ -1,0 +1,34 @@
+[
+ {
+  "area": "Capabilities",
+  "clicked": true,
+  "chars": 17976,
+  "error_lines": [
+   "Runai Diagnose Failed Workload",
+   "Use to diagnose failed, crashed, stopped, OOMKilled, CrashLoopBackOff, ImagePullBackOff, init, mount, node, or policy-terminated Run:ai work",
+   "Capture a full DevTools-protocol trace of any browser automation \u2014 CDP firehose, screenshots, and DOM dumps \u2014 then bisect the stream into pe"
+  ],
+  "shot": "08-capabilities"
+ },
+ {
+  "area": "Messaging",
+  "clicked": true,
+  "chars": 191,
+  "error_lines": [],
+  "shot": "09-messaging"
+ },
+ {
+  "area": "Artifacts",
+  "clicked": true,
+  "chars": 362,
+  "error_lines": [],
+  "shot": "10-artifacts"
+ },
+ {
+  "area": "Scheduled jobs",
+  "clicked": true,
+  "chars": 741,
+  "error_lines": [],
+  "shot": "11-scheduled-jobs"
+ }
+]

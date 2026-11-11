@@ -137,6 +137,20 @@ class Handler(BaseHTTPRequestHandler):
         if call:
             chunk({'tool_calls': [{'index': 0, 'id': 'call_lab_1', 'type': 'function', 'function': {'name': call[0], 'arguments': json.dumps(call[1])}}]})
             chunk({}, 'tool_calls', {'prompt_tokens': 10, 'completion_tokens': 5, 'total_tokens': 15})
+        elif 'STREAM:SLOW' in json.dumps(body.get('messages', [])[-1:]):
+            sent = 0
+            try:
+                for i in range(60):
+                    chunk({'content': f'tok{i} '})
+                    sent += 1
+                    time.sleep(0.4)
+                chunk({}, 'stop', {'prompt_tokens': 10, 'completion_tokens': 60, 'total_tokens': 70})
+                outcome = 'completed'
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
+                outcome = 'client-disconnected'
+            with LOCK:
+                open(os.path.join(LAB, 'logs', 'stub-stream.log'), 'a').write(json.dumps({'t': time.time(), 'chunks_sent': sent, 'outcome': outcome}) + '\n')
+            return
         else:
             chunk({'content': text})
             chunk({}, 'stop', {'prompt_tokens': 10, 'completion_tokens': 5, 'total_tokens': 15})

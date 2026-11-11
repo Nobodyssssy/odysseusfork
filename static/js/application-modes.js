@@ -157,6 +157,16 @@ function serviceMenu(status, message) {
   return menu;
 }
 
+async function launchProjects() {
+  const { response, result } = await post(`${endpoint}/projects/launch`, 30000);
+  if (!response.ok || typeof result.url !== 'string') throw new Error(result.detail || 'Projects could not be opened');
+  const url = new URL(result.url);
+  if (url.protocol !== 'http:' || url.hostname !== 'hermes.localhost' || url.port !== location.port || url.username || url.password) {
+    throw new Error('Projects returned an unexpected address; nothing was opened');
+  }
+  return url.href;
+}
+
 function hermesURL(value) {
   const url = new URL(value);
   if (url.protocol !== 'http:' || url.hostname !== '127.0.0.1' || !url.port || url.pathname !== '/' || url.search || url.hash || url.username || url.password) {
@@ -191,7 +201,8 @@ async function initialize() {
   selector.id = 'application-mode-selector';
   selector.disabled = true;
   selector.setAttribute('aria-label', 'Application mode');
-  for (const [value, label] of [['odysseus', 'Odysseus Mode'], ['hermes', 'Hermes Mode']]) {
+  const gateway = status.backend === 'gateway';
+  for (const [value, label] of gateway ? [['odysseus', 'Personal'], ['hermes', 'Projects']] : [['odysseus', 'Odysseus Mode'], ['hermes', 'Hermes Mode']]) {
     const option = document.createElement('option');
     option.value = value;
     option.textContent = label;
@@ -209,7 +220,7 @@ async function initialize() {
   const rememberPage = () => { providers.href = '/static/provider-sync.html?return=' + encodeURIComponent(location.pathname + location.search + location.hash); };
   for (const type of ['pointerenter', 'focus', 'click', 'auxclick']) providers.addEventListener(type, rememberPage);
   const services = serviceMenu(status, message);
-  bar.append(selector, providers, ...(services ? [services] : []), message);
+  bar.append(selector, ...(gateway ? [] : [providers]), ...(services ? [services] : []), message);
   document.querySelector('#chat-container').prepend(bar);
   try { await restoreChatState(message); }
   catch (_) { message.textContent = 'The saved draft could not be restored. Your current composer was not changed.'; }
@@ -220,6 +231,7 @@ async function initialize() {
     try {
       await assertCanLeave();
       status = await request(endpoint);
+      if (gateway && status.state !== 'ready') throw new Error('The official Hermes Webapp is not running. Odysseus does not start it; start it first.');
       if (status.state !== 'ready') {
         message.textContent = 'Starting Hermes…';
         status = await request(`${endpoint}/hermes/start`, 'POST');
@@ -234,7 +246,7 @@ async function initialize() {
       if (status.state !== 'ready') throw new Error('Hermes is not ready yet. Stay here and try again; no process was stopped.');
       await assertCanLeave();
       await saveChatState();
-      location.assign(destination(status).href);
+      location.assign(gateway ? await launchProjects() : destination(status).href);
     } catch (error) {
       message.textContent = error.message;
       selector.value = 'odysseus';

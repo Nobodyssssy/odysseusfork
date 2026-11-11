@@ -4,6 +4,7 @@ Needs the ``websockets`` package; the relay tests are skipped (the 501 path is t
 """
 import asyncio
 import json
+import os
 from pathlib import Path
 import socket
 import sys
@@ -45,9 +46,9 @@ class FakeGateway:
     """Behaves like the official gateway where it matters: only its own authority is an acceptable Host/Origin,
     the session token is required, and it echoes WebSocket frames. Records everything it sees."""
 
-    def __init__(self):
+    def __init__(self, public_host=None):
         self.port = free_port()
-        self.authority = f'127.0.0.1:{self.port}'
+        self.authority = public_host or f'127.0.0.1:{self.port}'   # the Host/Origin this gateway insists on
         self.requests = []
         self.ws_closed = threading.Event()
         self.ws_close_info = None
@@ -130,7 +131,7 @@ async def odysseus(scope, receive, send):
 class Served:
     def __init__(self, app, port):
         self.port = port
-        self.server = uvicorn.Server(uvicorn.Config(app, host='127.0.0.1', port=port, log_level='error', ws_max_size=64 * 1024 * 1024))
+        self.server = uvicorn.Server(uvicorn.Config(app, host='127.0.0.1', port=port, log_level='error', ws_max_size=64 * 1024 * 1024, ws=os.environ.get('PROXY_TEST_WS', 'auto')))
         self.thread = threading.Thread(target=self.server.run, daemon=True)
 
     def __enter__(self):
@@ -432,6 +433,72 @@ class GatewayWebSocketTests(GatewayProxyBase):
             status, _, sock = raw(port, handshake(f'hermes.localhost:{port}'))
             sock.close()
         self.assertEqual(status, 502)
+
+
+@unittest.skipIf(websockets is None, 'websockets is not installed')
+class PassThroughHostTests(unittest.TestCase):
+    """Sign-in gate on: the gateway insists on the browser's real Host/Origin (webapp.public_url), so they pass through."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.port = free_port()
+        cls.host = f'hermes.localhost:{cls.port}'
+        cls.gateway = FakeGateway(public_host=cls.host)
+        cls.gateway.start()
+        policy = ProxyPolicy.from_environment({'ODYSSEUS_HERMES_PROXY_UPSTREAM_HOST': 'public'})
+        cls.served = Served(HermesHostProxy(odysseus, f'http://127.0.0.1:{cls.gateway.port}', mode='gateway', policy=policy), cls.port)
+        cls.served.__enter__()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.served.__exit__()
+        cls.gateway.shutdown()
+
+    def setUp(self):
+        self.gateway.requests.clear()
+
+    def test_http_reaches_the_gateway_with_the_browsers_own_host_origin_and_referer(self):
+        status, _, body = fetch(self.port, self.host, '/api/echo', headers={
+            'Origin': f'http://{self.host}', 'Referer': f'http://{self.host}/page', 'Cookie': f'sess={TOKEN}'})
+        data = json.loads(body)
+        self.assertEqual(status, 200, body)
+        self.assertEqual((data['host'], data['origin'], data['referer']), (self.host, f'http://{self.host}', f'http://{self.host}/page'))
+
+    def test_websocket_reaches_the_gateway_with_the_browsers_own_host_and_origin(self):
+        async def go():
+            async with websockets.connect(f'ws://{self.host}/api/ws?token={TOKEN}', host='127.0.0.1', port=self.port,
+                                          origin=f'http://{self.host}', subprotocols=['hermes.v1'], max_size=None) as ws:
+                await ws.send('ping')
+                self.assertEqual(await ws.recv(), 'ping')
+                self.assertEqual(ws.subprotocol, 'hermes.v1')
+        asyncio.run(go())
+        seen = self.gateway.seen()[0]['headers']
+        self.assertEqual((seen['host'], seen['origin']), (self.host, f'http://{self.host}'))
+
+    def test_the_proxy_still_refuses_hostile_values_before_the_gateway(self):
+        for origin in ('http://evil.test', 'null', f'http://127.0.0.1:{self.gateway.port}', f'http://hermes.localhost:{self.port + 1}'):
+            with self.subTest(origin=origin):
+                self.assertEqual(fetch(self.port, self.host, '/api/echo', 'POST', {'Origin': origin, 'Cookie': f'sess={TOKEN}'})[0], 403)
+                status, _, sock = raw(self.port, handshake(self.host, origin=origin))
+                sock.close()
+                self.assertEqual(status, 403)
+        for host in ('evil.test', f'127.0.0.1:{self.gateway.port}', f'hermes.localhost:{self.port + 1}'):
+            self.assertEqual(fetch(self.port, host, '/api/echo', headers={'Cookie': f'sess={TOKEN}'})[2], b'ODYSSEUS')
+        self.assertEqual(fetch(self.port, self.host, '/api/echo', headers={'X-Forwarded-For': '1.2.3.4'})[0], 403)
+        self.assertEqual(self.gateway.seen(), [])
+
+    def test_bound_mode_would_have_been_refused_by_this_gateway(self):
+        port = free_port()
+        with Served(HermesHostProxy(odysseus, f'http://127.0.0.1:{self.gateway.port}', mode='gateway'), port):
+            self.assertEqual(fetch(port, f'hermes.localhost:{port}', '/api/echo', headers={'Cookie': f'sess={TOKEN}'})[0], 400)
+
+    def test_setting_is_validated(self):
+        self.assertFalse(ProxyPolicy.from_environment({}).pass_host)
+        self.assertFalse(ProxyPolicy.from_environment({'ODYSSEUS_HERMES_PROXY_UPSTREAM_HOST': 'bound'}).pass_host)
+        self.assertTrue(ProxyPolicy.from_environment({'ODYSSEUS_HERMES_PROXY_UPSTREAM_HOST': 'public'}).pass_host)
+        for value in ('rewrite', 'PUBLIC', '1', 'true'):
+            with self.subTest(value=value), self.assertRaises(ProxyConfigError):
+                ProxyPolicy.from_environment({'ODYSSEUS_HERMES_PROXY_UPSTREAM_HOST': value})
 
 
 class ExtraHostsAndOriginsTests(unittest.TestCase):

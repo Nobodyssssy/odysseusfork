@@ -18,9 +18,11 @@ Nothing here is installed, enabled or pushed. The proxy stays in the legacy mode
 | `Sec-Fetch-Site` | not checked | WebSocket: must be `same-origin`; unsafe HTTP methods: `same-origin` or `none` |
 | WebSocket | refused with 1008 (as before) | relayed frame for frame; Origin required |
 | CORS response headers | passed through | dropped (same-origin only) |
+| Host/Origin presented upstream | unchanged | `bound` (default): the gateway's own `127.0.0.1:PORT`; `public`: the browser's own, unchanged |
+| Request logs | untouched | `token=`, `ticket=`, `access_token=`, `session_token=`, `code=`, `launch=` query values redacted in httpx/uvicorn lines |
 | Cookie jar | none | none |
 
-Why rewrite instead of passing Host through: the gateway accepts only its own bound authority as Host and Origin
+Why rewrite by default (`bound`): the gateway accepts only its own bound authority as Host and Origin
 (`hermes_cli/web_server_boundary.py`), which is its DNS-rebinding defence, and it documents a Host-rewriting proxy as the supported
 arrangement. The proxy performs the browser-facing check itself and the gateway's own check still runs on what it receives.
 Nothing in the gateway was changed or relaxed, `webapp.public_url` was left empty, and the proxy never adds, stores or replays a
@@ -32,7 +34,12 @@ reason from either side reaches the other (1005/1006/1015 are mapped to legal co
 connection; if the gateway disappears the browser's socket is closed; a gateway refusal (e.g. 401) is returned with its real status;
 the largest frame is configurable (default 400 MB, because the gateway itself accepts one 384 MiB frame for an attachment).
 
-Configuration (all optional): `ODYSSEUS_HERMES_PROXY_MODE`, `ODYSSEUS_HERMES_PROXY_HOSTNAMES` (extra `*.localhost` names),
+`public` (pass-through) exists because the gateway's sign-in gate (`webapp.public_url` plus a dashboard provider) insists on the **real** browser origin for
+cookie-authenticated writes: with Host/Origin rewritten, minting a WebSocket ticket returned 403 "Cookie-authenticated writes must come from the Webapp's
+own origin" (live). With `public`, `webapp.public_url` must be `http://hermes.localhost:<Odysseus port>`; the gateway's own Host/Origin checks then judge
+the browser's real values. A mismatched pairing (`public` without `public_url`, or `bound` with the gate on) fails closed (400/403).
+
+Configuration (all optional): `ODYSSEUS_HERMES_PROXY_MODE`, `ODYSSEUS_HERMES_PROXY_UPSTREAM_HOST` (`bound`|`public`), `ODYSSEUS_HERMES_PROXY_HOSTNAMES` (extra `*.localhost` names),
 `ODYSSEUS_HERMES_PROXY_ORIGINS` (extra exact origins, e.g. a native shell), `ODYSSEUS_HERMES_PROXY_WS_NO_ORIGIN=1`,
 `ODYSSEUS_HERMES_PROXY_WS_MAX_MB`. Invalid values make the proxy refuse to install (fail closed) rather than fall back.
 
@@ -59,10 +66,13 @@ configuration validation, extra hostname, legacy mode unchanged.
 
 ## Not verified / limitations
 
-- The real Odysseus application was not run in front of the lab gateway; a stand-in ASGI app wrapped by the real proxy class was. The wiring (`install_hermes_proxy` in `app.py`, outermost middleware) is unchanged and unit-tested, but not exercised end to end.
+Retired since the first version of this note (see `hermes-webapp-preview.md`): the real Odysseus application was run in front of the gateway;
+`webapp.public_url` and the sign-in gate were tested; the Webapp's chat, streaming, Stop, approvals and the plugin-loaded return control were
+exercised in a real browser.
+
 - The production Odysseus venv has no `websockets` package: in gateway mode every WebSocket would be refused with 501 until `requirements.txt` is installed there (fails closed, tested).
-- uvicorn 0.54 logs `ASGI callable returned without completing handshake` once per refused WebSocket although the client receives the correct status; cosmetic. The plain-close alternative would lose the real status code.
-- `webapp.public_url` was not set. The gateway therefore runs without the dashboard login gate, and the session token in the browser's `sessionStorage` is the only credential: anything that can read that token (or `webapp\session-token` in the Hermes home) is the user. This is the same-user-code limit documented earlier; the proxy does not and cannot close it.
-- Large uploads through the Webapp (HTTP bodies, 384 MiB frames) were not exercised end to end; the 5 MB WebSocket frame and streamed HTTP bodies were.
-- Tokens in a WebSocket query string (`?token=`) are accepted by the gateway; the proxy forwards the query string and nothing logs it, but uvicorn access logs would show it if that form is used. The Webapp itself uses tickets.
-- Terminal sockets (`/api/host-terminal`, `/api/pty`), audio sockets and the Electron app were not tested.
+- uvicorn 0.54 logs `ASGI callable returned without completing handshake` once per refused WebSocket although the client receives the correct status; cosmetic. Its `--ws websockets` implementation is deprecated in favour of `websockets-sansio`; the relay was exercised with the default and with `websockets-sansio` in the unit suite (see the final report for the result).
+- Same-user code can read the gateway's browser credential (`webapp\session-token`); the proxy does not and cannot close that.
+- Odysseus logout does not end a Webapp session; `POST /auth/logout` (basic provider) clears only the browser's cookies; `webapp-sign-out` is the revocation.
+- Large uploads through the Webapp (HTTP bodies, 384 MiB frames) were not exercised end to end; a 5 MB WebSocket frame and streamed HTTP bodies were.
+- The terminal sockets (`/api/host-terminal`, `/api/pty`) and audio sockets were not exercised; the Electron app was not tested.

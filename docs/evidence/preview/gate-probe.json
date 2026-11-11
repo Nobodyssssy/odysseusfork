@@ -1,0 +1,302 @@
+[
+ {
+  "check": "GET /api/health (public)",
+  "got": "200 auth_required=True",
+  "expect": "200 auth_required=True",
+  "ok": "PASS"
+ },
+ {
+  "check": "GET /api/profiles no credentials",
+  "got": "401",
+  "expect": "401",
+  "ok": "PASS"
+ },
+ {
+  "check": "GET /api/sessions no credentials",
+  "got": "401",
+  "expect": "401",
+  "ok": "PASS"
+ },
+ {
+  "check": "GET /api/config no credentials",
+  "got": "401",
+  "expect": "401",
+  "ok": "PASS"
+ },
+ {
+  "check": "GET /api/fs/read-text no credentials",
+  "got": "401",
+  "expect": "401",
+  "ok": "PASS"
+ },
+ {
+  "check": "GET /api/git/status no credentials",
+  "got": "401",
+  "expect": "401",
+  "ok": "PASS"
+ },
+ {
+  "check": "GET / (shell or login redirect)",
+  "got": "302 location=/login?next=%2F",
+  "expect": null,
+  "ok": ""
+ },
+ {
+  "check": "GET /login (server-rendered login page)",
+  "got": "200 bytes=10180",
+  "expect": "200",
+  "ok": "PASS"
+ },
+ {
+  "check": "GET /api/auth/providers",
+  "got": "200 {\"providers\": [{\"name\": \"basic\", \"display_name\": \"Username & Password\", \"supports_password\": true}]}",
+  "expect": "200",
+  "ok": "PASS"
+ },
+ {
+  "check": "password-login: wrong password",
+  "got": "401",
+  "expect": "401",
+  "ok": "PASS"
+ },
+ {
+  "check": "password-login: wrong username",
+  "got": "401",
+  "expect": "401",
+  "ok": "PASS"
+ },
+ {
+  "check": "password-login: correct credentials, EVIL Origin (CSRF)",
+  "got": "403",
+  "expect": "403",
+  "ok": "PASS"
+ },
+ {
+  "check": "password-login: correct credentials, Origin: null",
+  "got": "403",
+  "expect": "403",
+  "ok": "PASS"
+ },
+ {
+  "check": "password-login: correct credentials, cross-site fetch metadata",
+  "got": "403",
+  "expect": "403",
+  "ok": "PASS"
+ },
+ {
+  "check": "password-login: correct credentials, own Origin",
+  "got": "200 cookies=['hermes_session_at_d4b442d8c0db462d', 'hermes_session_provider_d4b442d8c0db462d', 'hermes_session_rt_d4b442d8c0db462d', 'hermes_webapp_signin_d4b442d8c0db462d']",
+  "expect": "200",
+  "ok": "PASS"
+ },
+ {
+  "check": "every session cookie is HttpOnly",
+  "got": "True",
+  "expect": "True",
+  "ok": "PASS"
+ },
+ {
+  "check": "no cookie has a Domain attribute (host-only)",
+  "got": "True",
+  "expect": "True",
+  "ok": "PASS"
+ },
+ {
+  "check": "GET /api/profiles with login cookies",
+  "got": "200",
+  "expect": "200",
+  "ok": "PASS"
+ },
+ {
+  "check": "  + X-Forwarded-For",
+  "got": "403",
+  "expect": "403",
+  "ok": "PASS"
+ },
+ {
+  "check": "POST with login cookies, EVIL Origin",
+  "got": "403",
+  "expect": "403",
+  "ok": "PASS"
+ },
+ {
+  "check": "login cookies sent to forged Host evil.test (-> Odysseus)",
+  "got": "401 b'{\"error\":\"Not authenticated\"}'",
+  "expect": "401",
+  "ok": "PASS"
+ },
+ {
+  "check": "GET /api/auth/me",
+  "got": "200 b'{\"user_id\":\"labgate\",\"email\":\"\",\"display_name\":\"labgate\",\"org_id\":\"\",\"provider\":'",
+  "expect": "200",
+  "ok": "PASS"
+ },
+ {
+  "check": "mint a one-use socket ticket with login cookies",
+  "got": "webapp:200 got_ticket=True",
+  "expect": "got_ticket=True",
+  "ok": "PASS"
+ },
+ {
+  "check": "WS valid ticket + cookies, evil Origin",
+  "got": "403 Forbidden",
+  "expect": "403",
+  "ok": "PASS"
+ },
+ {
+  "check": "WS valid ticket + cookies, Origin: null",
+  "got": "403 Forbidden",
+  "expect": "403",
+  "ok": "PASS"
+ },
+ {
+  "check": "WS valid ticket + cookies, no Origin",
+  "got": "403 Forbidden",
+  "expect": "403",
+  "ok": "PASS"
+ },
+ {
+  "check": "WS valid ticket + cookies, cross-site fetch metadata",
+  "got": "403 Forbidden",
+  "expect": "403",
+  "ok": "PASS"
+ },
+ {
+  "check": "WS valid ticket + cookies, X-Forwarded-For",
+  "got": "403 Forbidden",
+  "expect": "403",
+  "ok": "PASS"
+ },
+ {
+  "check": "WS valid ticket + cookies, forged Host",
+  "got": "403 Forbidden",
+  "expect": null,
+  "ok": ""
+ },
+ {
+  "check": "WS no ticket, no cookies, own Origin",
+  "got": "403 Forbidden",
+  "expect": "403",
+  "ok": "PASS"
+ },
+ {
+  "check": "WS forged ticket, no cookies",
+  "got": "403 Forbidden",
+  "expect": "403",
+  "ok": "PASS"
+ },
+ {
+  "check": "WS the real ticket, legitimate request",
+  "got": "101 Switching Protocols",
+  "expect": "101",
+  "ok": "PASS"
+ },
+ {
+  "check": "WS replay of that ticket",
+  "got": "403 Forbidden",
+  "expect": "403",
+  "ok": "PASS"
+ },
+ {
+  "check": "live WebSocket negotiated protocol",
+  "got": "hermes-gateway-v1",
+  "expect": "hermes-gateway-v1",
+  "ok": "PASS"
+ },
+ {
+  "check": "A) POST /auth/logout (browser sign-out)",
+  "got": "302 location=/login",
+  "expect": "302",
+  "ok": "PASS"
+ },
+ {
+  "check": "   logout clears the browser cookies",
+  "got": "True",
+  "expect": "True",
+  "ok": "PASS"
+ },
+ {
+  "check": "   live socket after /auth/logout",
+  "got": "still open",
+  "expect": null,
+  "ok": ""
+ },
+ {
+  "check": "   COPIED cookies replayed after /auth/logout (stateless token)",
+  "got": "200",
+  "expect": null,
+  "ok": ""
+ },
+ {
+  "check": "B) webapp-sign-out (rotates the browser credential)",
+  "got": "{'signed_out': True, 'serving': True, 'sign_in_gate': True, 'connections_closed': 3}",
+  "expect": "'signed_out': True",
+  "ok": "PASS"
+ },
+ {
+  "check": "   live socket after webapp-sign-out",
+  "got": "closed code=4401",
+  "expect": "closed",
+  "ok": "PASS"
+ },
+ {
+  "check": "   copied cookies after webapp-sign-out",
+  "got": "401",
+  "expect": "401",
+  "ok": "PASS"
+ },
+ {
+  "check": "   mint a ticket with copied cookies after webapp-sign-out",
+  "got": "401",
+  "expect": "401",
+  "ok": "PASS"
+ },
+ {
+  "check": "fresh login after sign-out",
+  "got": "200",
+  "expect": "200",
+  "ok": "PASS"
+ },
+ {
+  "check": "direct :19120 WITH valid cookies, Host evil.test",
+  "got": "400",
+  "expect": null,
+  "ok": ""
+ },
+ {
+  "check": "direct :19120 WITH valid cookies, Host evil.test + Origin evil",
+  "got": "400",
+  "expect": null,
+  "ok": ""
+ },
+ {
+  "check": "direct :19120 WITH valid cookies, Host 127.0.0.1.evil.test",
+  "got": "400",
+  "expect": null,
+  "ok": ""
+ },
+ {
+  "check": "direct :19120 WITH valid cookies, Host hermes.localhost:19800 (the trusted public host)",
+  "got": "200",
+  "expect": null,
+  "ok": ""
+ },
+ {
+  "check": "direct :19120 WITH valid cookies, Host 127.0.0.1:19120 (bound authority)",
+  "got": "200",
+  "expect": null,
+  "ok": ""
+ },
+ {
+  "check": "14 wrong passwords in a row",
+  "got": "[401, 401, 401, 401, 401, 401, 429, 429, 429, 429, 429, 429, 429, 429]",
+  "expect": "401",
+  "ok": "PASS"
+ },
+ {
+  "check": "  -> throttled (429 seen)?",
+  "got": "True",
+  "expect": "True",
+  "ok": "PASS"
+ }
+]
