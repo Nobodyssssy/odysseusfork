@@ -53,10 +53,10 @@ index 017650278..bbc5d3c62 100644
          return _handle_workspace_add(handler, body)
 diff --git a/api/trusted_workspaces.py b/api/trusted_workspaces.py
 new file mode 100644
-index 000000000..41c99ed8a
+index 000000000..1c2371cec
 --- /dev/null
 +++ b/api/trusted_workspaces.py
-@@ -0,0 +1,553 @@
+@@ -0,0 +1,609 @@
 +"""Trusted Workspaces: folders the user has approved for the Agent's file tools.
 +
 +How it works
@@ -118,6 +118,7 @@ index 000000000..41c99ed8a
 +_RECENT = collections.deque(maxlen=50)   # audit trail of decisions, newest last
 +_LAST_POLL = 0.0        # monotonic time a browser last asked for pending requests
 +_HOOKED = False
++_SESSION_GRANTS = {}    # session key -> {canonical folder: identity}; "Allow for this chat", lives until restart
 +
 +
 +class WorkspaceError(ValueError):
@@ -261,6 +262,7 @@ index 000000000..41c99ed8a
 +        _ONCE.clear()
 +        _REQUESTS.clear()
 +        _REFUSED.clear()
++        _SESSION_GRANTS.clear()
 +        if _ENABLED:
 +            _apply()
 +            install_hook()
@@ -303,6 +305,7 @@ index 000000000..41c99ed8a
 +            'configured': list(_BASE or ()),
 +            'always': [{'path': e['path'], 'added': e.get('added'), 'active': e['path'] in roots} for e in saved.values()],
 +            'once': sorted(_ONCE),
++            'chat': sorted({folder for grants in _SESSION_GRANTS.values() for folder in grants}),
 +            'stale': stale,
 +            'blocked': [e['path'] for e in _read_state()['blocked']] if _ENABLED else [],
 +            'recent': list(_RECENT),
@@ -351,6 +354,10 @@ index 000000000..41c99ed8a
 +        for key in [k for k in _ONCE if os.path.normcase(os.path.realpath(k)) == target]:
 +            _ONCE.pop(key)
 +            removed = True
++        for grants in _SESSION_GRANTS.values():
++            for folder in [f for f in grants if os.path.normcase(os.path.realpath(f)) == target]:
++                grants.pop(folder)
++                removed = True
 +        _apply()
 +        return {'result': 'revoked' if removed else 'not_found', 'path': path}
 +
@@ -361,6 +368,42 @@ index 000000000..41c99ed8a
 +
 +def _timestamp():
 +    return time.strftime('%Y-%m-%dT%H:%M:%S')
++
++
++def _current_session():
++    """The chat this tool call belongs to (context-local, race-safe across concurrent chats), or ''."""
++    try:
++        from tools.approval import get_current_session_key
++        return str(get_current_session_key(default='') or '')
++    except Exception:
++        return ''
++
++
++def _session_allows(path, session):
++    """True when ``session`` holds a grant covering ``path`` whose folder is still the one that was approved."""
++    if not session:
++        return False
++    with _LOCK:
++        grants = _SESSION_GRANTS.get(session)
++        if not grants or _blocked_match(path):
++            return False
++        for folder, ident in list(grants.items()):
++            try:
++                if os.path.isdir(folder) and _identity(folder) == ident:
++                    if _is_under(path, folder):
++                        return True
++                    continue
++            except OSError:
++                pass
++            grants.pop(folder, None)       # folder gone or replaced (junction): the grant no longer counts
++        return False
++
++
++def _grant_session(session, folder):
++    with _LOCK:
++        if _blocked_match(folder):
++            raise WorkspaceError('That folder is on the "never allow" list. Remove it from there first.')
++        _SESSION_GRANTS.setdefault(session, {})[folder] = _identity(folder)
 +
 +
 +def _log(event, folder, verb, note=''):
@@ -484,7 +527,8 @@ index 000000000..41c99ed8a
 +        if refused and refused[0] > now:
 +            reason = f' Reason from the user: "{refused[1]}".' if refused[1] else ''
 +            return _denied(verb, path, f'the user already declined access to this folder.{reason} Do not ask again unless the user asks you to.')
-+        request = next((r for r in _REQUESTS.values() if _norm(r['folder']) == _norm(folder) and r.get('decision') is None), None)
++        session = _current_session()
++        request = next((r for r in _REQUESTS.values() if _norm(r['folder']) == _norm(folder) and r.get('session') == session and r.get('decision') is None), None)
 +        if request is None:
 +            if now - _LAST_POLL > ATTENDED_WINDOW:
 +                _log('unattended', folder, verb)
@@ -496,7 +540,7 @@ index 000000000..41c99ed8a
 +                repo = canonicalize(repo) if repo and _norm(repo) != _norm(folder) else None
 +            except WorkspaceError:
 +                repo = None
-+            request = {'id': uuid.uuid4().hex, 'folder': folder, 'repo': repo, 'file': str(path), 'verb': verb,
++            request = {'id': uuid.uuid4().hex, 'folder': folder, 'repo': repo, 'file': str(path), 'verb': verb, 'session': session,
 +                       'created': _timestamp(), 'deadline': now + REQUEST_TTL, 'event': threading.Event(), 'decision': None, 'note': ''}
 +            _REQUESTS[request['id']] = request
 +            _log('asked', folder, verb)
@@ -511,7 +555,7 @@ index 000000000..41c99ed8a
 +        if decision is None:
 +            request['decision'] = 'expired'
 +            _log('expired', folder, verb)
-+    if decision == 'granted' and is_trusted(path):
++    if decision == 'granted' and (is_trusted(path) or _session_allows(path, session)):
 +        return {'granted': True, 'message': ''}
 +    if decision == 'denied':
 +        reason = f' Reason from the user: "{request["note"]}".' if request.get('note') else ''
@@ -529,14 +573,14 @@ index 000000000..41c99ed8a
 +        if watch:
 +            _LAST_POLL = now
 +        return [{'id': r['id'], 'file': r['file'], 'verb': r['verb'], 'folder': r['folder'], 'repo': r['repo'],
-+                 'created': r['created'], 'expires_in': max(0, int(r['deadline'] - now))}
++                 'chat': bool(r.get('session')), 'created': r['created'], 'expires_in': max(0, int(r['deadline'] - now))}
 +                for r in _REQUESTS.values() if r.get('decision') is None]
 +
 +
 +def decide(request_id, decision, scope='folder', note=''):
-+    """Answer a waiting request: once | always | deny | never. ``scope`` is 'folder' or 'repo'."""
-+    if decision not in ('once', 'always', 'deny', 'never'):
-+        raise WorkspaceError('Choose Allow once, Always allow, Deny or Never allow.')
++    """Answer a waiting request: once | session | always | deny | never. ``scope`` is 'folder' or 'repo'."""
++    if decision not in ('once', 'session', 'always', 'deny', 'never'):
++        raise WorkspaceError('Choose Allow once, Allow for this chat, Always allow, Deny or Never allow.')
 +    with _LOCK:
 +        request = _REQUESTS.get(request_id) if isinstance(request_id, str) else None
 +        if request is None or request.get('decision') is not None:
@@ -545,6 +589,12 @@ index 000000000..41c99ed8a
 +        text = _clean_note(note)
 +        if decision in ('once', 'always'):
 +            approve(target, decision)      # refuses blocked/forbidden folders; the request stays waiting on error
++            request['decision'] = 'granted'
++        elif decision == 'session':
++            if not request.get('session'):
++                raise WorkspaceError('This request is not tied to a chat, so it cannot be allowed for one chat. Choose Allow once.')
++            canonical = canonicalize(target)       # same refusals as an approval: no drive roots, home, system folders
++            _grant_session(request['session'], canonical)
 +            request['decision'] = 'granted'
 +        else:
 +            if decision == 'never':
@@ -559,7 +609,7 @@ index 000000000..41c99ed8a
 +                continue
 +            if _blocked_match(other['folder']):
 +                other['decision'] = 'denied'
-+            elif is_trusted(other['folder']):
++            elif is_trusted(other['folder']) or _session_allows(other['folder'], other.get('session')):
 +                other['decision'] = 'granted'
 +            else:
 +                continue
@@ -578,6 +628,9 @@ index 000000000..41c99ed8a
 +            return None
 +        if 'outside HERMES_WRITE_SAFE_ROOT' not in message:
 +            return message                    # credential/protected-file denials are never promptable
++        # Only the safe-root refusal reaches here, so no credential rule is being overridden.
++        if _ENABLED and _session_allows(path, _current_session()):
++            return None
 +        try:
 +            verdict = request_access(path, verb)
 +        except Exception:
@@ -586,7 +639,10 @@ index 000000000..41c99ed8a
 +        if verdict is None:
 +            return message
 +        if verdict['granted']:
-+            return original(path, *args, **kwargs)
++            again = original(path, *args, **kwargs)
++            if again is not None and 'outside HERMES_WRITE_SAFE_ROOT' in again and _session_allows(path, _current_session()):
++                return None
++            return again
 +        return verdict['message']
 +    guarded._tw_guard = True
 +    return guarded
@@ -718,10 +774,10 @@ index 902b2843e..37a764982 100644
  <script src="static/commands.js?v=__WEBUI_VERSION__" defer></script>
 diff --git a/static/trusted-workspaces.js b/static/trusted-workspaces.js
 new file mode 100644
-index 000000000..db29219e1
+index 000000000..8e614a6c6
 --- /dev/null
 +++ b/static/trusted-workspaces.js
-@@ -0,0 +1,298 @@
+@@ -0,0 +1,300 @@
 +/* Trusted Workspaces: asks before Hermes's file tools may write in a newly chosen folder.
 + * A permission for Hermes's file tools only; it is not an operating-system sandbox.
 + * Approvals are made only from a click in this dialog. */
@@ -878,14 +934,15 @@ index 000000000..db29219e1
 +        b.dataset.decision = decision;
 +        return b;
 +      };
-+      const buttons = [button('Never allow', 'never'), button('Deny', 'deny'), button('Allow once', 'once'), button('Always allow', 'always', true)];
++      const buttons = [button('Never allow', 'never'), button('Deny', 'deny'), button('Allow once', 'once'),
++        ...(request.chat ? [button('Allow for this chat', 'session', true)] : []), button('Always allow', 'always', !request.chat)];
 +      const row = el('div', {}, ...buttons);
 +      row.style.cssText = 'display:flex;gap:8px;justify-content:flex-end;margin-top:12px;flex-wrap:wrap';
 +      const title = el('h2', { textContent: 'Hermes wants to ' + String(request.verb || 'write').toLowerCase() + ' a file outside your approved folders' });
 +      title.style.cssText = 'margin:0 0 8px;font-size:17px';
 +      box.append(title, code(request.file),
 +        el('div', { textContent: 'Allow Hermes\'s file tools to change files in:' }), scopeBox, note,
-+        el('div', { textContent: 'The Hermes run is paused until you answer. Allow once lasts until Hermes restarts. This controls Hermes\'s file tools only; it is not an operating-system sandbox.' }),
++        el('div', { textContent: 'The Hermes run is paused until you answer. "Allow for this chat" applies to this conversation only; "Allow once" applies to every chat until Hermes restarts; both end when Hermes restarts. This controls Hermes\'s file tools only; it is not an operating-system sandbox.' }),
 +        status, timer, row);
 +      overlay.append(box);
 +      document.body.append(overlay);
@@ -985,6 +1042,7 @@ index 000000000..db29219e1
 +      for (const path of r.data.configured) rows.push(row(path, '(set when Hermes starts; cannot be revoked here)', false));
 +      for (const item of r.data.always) rows.push(row(item.path, item.active ? '(always)' : '(always; folder changed, needs re-approval)', true));
 +      for (const path of r.data.once) rows.push(row(path, '(until Hermes restarts)', true));
++      for (const path of r.data.chat || []) rows.push(row(path, '(one chat, until Hermes restarts)', true));
 +      if (!rows.length) rows.push(el('div', { textContent: 'No folders are trusted. Hermes cannot write anywhere until you approve one.' }));
 +      for (const path of r.data.blocked || []) blockedRows.push(row(path, '(never allowed)', true, 'unblock', 'Allow again'));
 +      for (const item of (r.data.recent || []).slice(-8).reverse()) {
@@ -1022,10 +1080,10 @@ index 000000000..db29219e1
 +})();
 diff --git a/tests/test_trusted_workspaces_prompts.py b/tests/test_trusted_workspaces_prompts.py
 new file mode 100644
-index 000000000..1037c4b8c
+index 000000000..9d764e7c5
 --- /dev/null
 +++ b/tests/test_trusted_workspaces_prompts.py
-@@ -0,0 +1,280 @@
+@@ -0,0 +1,430 @@
 +"""Inline approval prompts for Trusted Workspaces.
 +
 +A file tool refused for an unapproved folder waits for the human, then proceeds or is refused with the
@@ -1051,10 +1109,10 @@ index 000000000..1037c4b8c
 +def fake_agent_guard(path, *, verb='Write', entry=False):
 +    """Same contract and refusal text as agent.file_safety.get_write_denied_error for the safe-root case."""
 +    roots = [r for r in os.environ.get(tw.ENV, '').split(os.pathsep) if r]
++    if 'credential' in str(path):                      # the real guard classifies credentials BEFORE the safe-root rule
++        return f"{verb} denied: '{path}' is a protected system/credential file."
 +    if roots and not any(tw._is_under(path, r) for r in roots):
 +        return f"{verb} denied: '{path}' is outside HERMES_WRITE_SAFE_ROOT ({os.pathsep.join(roots)}). Unset the variable."
-+    if 'credential' in str(path):
-+        return f"{verb} denied: '{path}' is a protected system/credential file."
 +    return None
 +
 +
@@ -1089,6 +1147,9 @@ index 000000000..1037c4b8c
 +        self.saved = (tw._hermes_home, tw.install_hook, tw.REQUEST_TTL, tw.REFUSAL_MEMORY, tw.MAX_PENDING)
 +        tw._hermes_home = lambda: self.tmp / '_hermes_home'
 +        tw.install_hook = lambda: False
++        self.session = 'chat-A'
++        self.real_current_session = tw._current_session
++        tw._current_session = lambda: self.session
 +        tw._RECENT.clear()
 +        tw._LAST_POLL = 0.0
 +        self.assertTrue(tw.init())
@@ -1096,6 +1157,8 @@ index 000000000..1037c4b8c
 +
 +    def tearDown(self):
 +        tw._hermes_home, tw.install_hook, tw.REQUEST_TTL, tw.REFUSAL_MEMORY, tw.MAX_PENDING = self.saved
++        tw._current_session = self.real_current_session
++        tw._SESSION_GRANTS.clear()
 +        tw._REQUESTS.clear()
 +        tw._REFUSED.clear()
 +        if self.saved_env is None:
@@ -1282,6 +1345,151 @@ index 000000000..1037c4b8c
 +        state = tw._read_state()
 +        self.assertEqual(len(state['always']), 1)
 +        self.assertEqual(len(state['blocked']), 1)
++
++    # -- "Allow for this chat" -----------------------------------------------------------------
++    def test_chat_grant_lets_this_chat_write_without_widening_the_global_roots(self):
++        results = []
++        human = answer_when_asked('session', results)
++        self.assertIsNone(self.guard(self.target('plain', 'a.txt')))
++        human.join(2)
++        self.assertEqual(results[0]['result'], 'session')
++        self.assertNotIn(str(self.work / 'plain'), os.environ[tw.ENV], 'a chat grant must not change the process-wide roots')
++        self.assertEqual(tw._read_state()['always'], [], 'and it is never written to disk')
++        started = time.monotonic()
++        self.assertIsNone(self.guard(self.target('plain', 'sub', 'b.txt')), 'second write: no new prompt, subfolders covered')
++        self.assertLess(time.monotonic() - started, 0.5)
++
++    def test_another_chat_is_still_asked(self):
++        results = []
++        human = answer_when_asked('session', results)
++        self.assertIsNone(self.guard(self.target('plain', 'a.txt')))
++        human.join(2)
++        self.session = 'chat-B'
++        tw._LAST_POLL = 0.0                      # nobody is looking at the page any more
++        self.assertIn('no Hermes browser tab', self.guard(self.target('plain', 'a.txt')), 'chat B has no grant, so it must be refused or asked')
++
++    def test_chat_grant_does_not_cover_other_folders(self):
++        results = []
++        human = answer_when_asked('session', results)
++        self.assertIsNone(self.guard(self.target('plain', 'a.txt')))
++        human.join(2)
++        tw._LAST_POLL = 0.0
++        self.assertIn('no Hermes browser tab', self.guard(self.target('repo', 'src', 'x.rs')))
++
++    def test_never_allow_beats_a_chat_grant(self):
++        results = []
++        human = answer_when_asked('session', results)
++        self.assertIsNone(self.guard(self.target('plain', 'a.txt')))
++        human.join(2)
++        tw.block(self.target('plain'))
++        self.assertIn('never-allow', self.guard(self.target('plain', 'a.txt')))
++
++    def test_chat_grant_never_overrides_credential_protection(self):
++        results = []
++        human = answer_when_asked('session', results)
++        self.assertIsNone(self.guard(self.target('plain', 'a.txt')))
++        human.join(2)
++        self.assertIn('protected system/credential file', self.guard(self.target('plain', 'credential-store.json')))
++
++    def test_chat_grant_is_dropped_when_the_folder_is_removed_or_replaced(self):
++        results = []
++        human = answer_when_asked('session', results)
++        self.assertIsNone(self.guard(self.target('plain', 'a.txt')))
++        human.join(2)
++        tw._LAST_POLL = 0.0
++        shutil.rmtree(self.work / 'plain')
++        (self.work / 'plain').mkdir()
++        tw._SESSION_GRANTS['chat-A'][str(self.work / 'plain')] = [0, 0]        # simulate a different directory taking its place
++        self.assertIn('no Hermes browser tab', self.guard(self.target('plain', 'a.txt')))
++        self.assertEqual(tw._SESSION_GRANTS['chat-A'], {})
++
++    def test_chat_grant_needs_a_chat(self):
++        self.session = ''
++        tw.pending(watch=True)
++        outcome = []
++
++        def ask():
++            outcome.append(self.guard(self.target('plain', 'a.txt')))
++
++        thread = threading.Thread(target=ask, daemon=True)
++        thread.start()
++        time.sleep(0.4)
++        waiting = tw.pending(watch=True)
++        self.assertFalse(waiting[0]['chat'], 'the dialog must not offer a chat grant outside a chat')
++        with self.assertRaises(tw.WorkspaceError):
++            tw.decide(waiting[0]['id'], 'session')
++        tw.decide(waiting[0]['id'], 'deny')
++        thread.join(3)
++
++    def test_prompt_tells_the_page_when_a_chat_grant_is_possible(self):
++        seen = []
++
++        def look():
++            for _ in range(100):
++                waiting = tw.pending(watch=True)
++                if waiting:
++                    seen.append(waiting[0])
++                    tw.decide(waiting[0]['id'], 'deny')
++                    return
++                time.sleep(0.05)
++
++        thread = threading.Thread(target=look, daemon=True)
++        thread.start()
++        self.guard(self.target('plain', 'a.txt'))
++        thread.join(2)
++        self.assertTrue(seen[0]['chat'])
++        self.assertNotIn('session', seen[0], 'the page must not receive the raw session key')
++
++    def test_revoke_removes_chat_grants_and_status_lists_them(self):
++        results = []
++        human = answer_when_asked('session', results)
++        self.assertIsNone(self.guard(self.target('plain', 'a.txt')))
++        human.join(2)
++        self.assertEqual(tw.status()['chat'], [str(self.work / 'plain')])
++        self.assertEqual(tw.revoke(self.target('plain'))['result'], 'revoked')
++        self.assertEqual(tw.status()['chat'], [])
++        tw._LAST_POLL = 0.0
++        self.assertIn('no Hermes browser tab', self.guard(self.target('plain', 'a.txt')))
++
++    def test_a_chat_grant_settles_a_waiting_request_from_the_same_chat_only(self):
++        tw.pending(watch=True)
++        outcomes = {}
++
++        local = threading.local()
++        tw._current_session = lambda: getattr(local, 'chat', self.session)     # per-thread, like the real context value
++
++        def run(name, session, sub):
++            local.chat = session                         # each thread plays a different chat
++            outcomes[name] = self.guard(self.target('repo', sub, 'f.txt'))
++
++        a = threading.Thread(target=run, args=('A', 'chat-A', 'src'), daemon=True)
++        b = threading.Thread(target=run, args=('B', 'chat-B', 'docs'), daemon=True)
++        tw.canonicalize(str(self.base))              # warm the lazy imports so thread timing is not dominated by them
++
++        def wait_for(count):
++            for _ in range(200):
++                found = tw.pending(watch=True)
++                if len(found) == count:
++                    return found
++                time.sleep(0.05)
++            return tw.pending(watch=True)
++
++        a.start()
++        self.assertEqual(len(wait_for(1)), 1)
++        b.start()
++        waiting = wait_for(2)
++        self.assertEqual(len(waiting), 2)
++        # find chat A's request by its folder, grant the whole repo for that chat
++        mine = next(w for w in waiting if w['folder'].endswith('src'))
++        tw.decide(mine['id'], 'session', scope='repo')
++        a.join(5)
++        self.assertIsNone(outcomes['A'])
++        time.sleep(0.5)
++        self.assertNotIn('B', outcomes, 'chat B must still be waiting')
++        other = tw.pending(watch=False)
++        self.assertEqual(len(other), 1)
++        tw.decide(other[0]['id'], 'deny')
++        b.join(5)
 +
 +    # -- the real Agent module ----------------------------------------------------------------
 +    def test_hook_wraps_the_agents_real_write_guard_once(self):
