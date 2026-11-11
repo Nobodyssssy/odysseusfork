@@ -8,5 +8,9 @@
     "repository": "nesquena/hermes-webui",
     "revision": "f328d3f8e17f92a72fd71cc05f1e45665f2bc662"
   },
+  "webapp": {
+    "repository": "NousResearch/hermes-agent",
+    "revision": "3b421578588243f920886e6fe79a6faa87ea026e"
+  },
   "runtime": { "major": 3, "minor": 14, "owner": "hermes-pm", "extras": [] }
 }
