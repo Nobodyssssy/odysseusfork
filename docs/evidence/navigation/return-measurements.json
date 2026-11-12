@@ -31,5 +31,6 @@
   "usable_after": false
  },
  "direct_open_of_projects_in_a_fresh_tab": "shows the Webapp sign-in (its token is per tab, by design); not a navigation case",
- "chrome_only": "measured in the harness Chromium; other browsers unverified (the plugin falls back to a normal navigation without the Navigation API)"
+ "chrome_only": "measured in the harness Chromium; other browsers unverified (the plugin falls back to a normal navigation without the Navigation API)",
+ "status_note": "logout_while_in_projects and logout_then_cached_personal were run live; their final outputs were not re-read after context compaction, so those figures are unconfirmed until repeated"
 }

@@ -51,3 +51,11 @@ Order is by value for effort; none needs a frontend rewrite.
 
 ## 6. Evidence
 `docs/evidence/navigation/measurements.json` (raw numbers above). The back/forward-cache reasons are Chrome's own `notRestoredReasons` for the Projects entry.
+
+## Update: history return, revoked access, cached pages (measured, browser)
+
+- **Return**: "← Personal" goes back through history when this tab arrived from Odysseus (a 30 s, non-secret hint set by the proxy), so the cached Personal page is restored with its state: 0.07 s, JS marker and draft kept. A tab opened directly on Projects has no such entry and falls back to a normal navigation after 900 ms (the earlier 1.58 s was measured at 1500 ms; the 900 ms value itself is not re-measured).
+- *Status of the next two bullets:* the logout scenarios were run live, but their final outputs were not re-read after the session was compacted; treat the figures as **unconfirmed** until the scenario is repeated (`docs/evidence/navigation/return-measurements.json`).
+- **Revoked access**: if Odysseus ends access (logout in another tab, expiry), the Hermes gate answers 401 with `X-Odysseus-Grant: required`; the plugin sends the tab to Odysseus instead of the Webapp's own full-screen sign-in prompt. Live: the Projects tab reached the Odysseus login by itself.
+- **Cached Personal after logout elsewhere**: the restored page is replaced by the login within 0.42 s (stale content visible 0.35 s, not usable). Its draft snapshot is dropped on restore (a leftover one blocked the next switch; fixed).
+- Nothing was cached or loosened to get this speed; Chrome-specific Webapp caching was not implemented, as instructed.
