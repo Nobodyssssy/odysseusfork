@@ -261,7 +261,7 @@ class RouteTests(unittest.TestCase):
         client, service = self.client()
         with patch.object(controls, 'supported', return_value=True), patch.object(controls, 'odysseus_restart_plan', return_value=None):
             result = client.get('/api/application-modes').json()
-        self.assertEqual(result['controls'], {'hermes_stop': True, 'hermes_restart': True, 'odysseus_restart': False})
+        self.assertEqual(result['controls'], {'hermes_stop': True, 'hermes_restart': True, 'hermes_start': False, 'odysseus_restart': False})
         service.status.return_value = {'enabled': False}
         self.assertNotIn('controls', client.get('/api/application-modes').json())
         with patch.object(controls, 'supported', return_value=False):

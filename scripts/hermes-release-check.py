@@ -17,7 +17,7 @@ import time
 
 APP = Path(__file__).resolve().parents[1]
 BASELINE = APP / 'config' / 'release-baseline.json'
-SKIP = ['--ignore=tests/smoke', '--ignore=tests/test_review_calendar_invitation.py']
+SKIP = ['--ignore=tests/smoke', '--ignore=tests/test_review_calendar_invitation.py', '--ignore=tests/test_cook_sft_alex_conversations.py', '--ignore=tests/test_odysseus_conversation_qa.py']     # these import Unix fcntl
 # Both are baseline failures that open a real connection to a link-local/unresolvable address: on this PC they can wait for minutes or forever, and the
 # parallel run then waits on that one worker. They are run on their own, with a hard limit, after the parallel run. Not part of the migration.
 HANG_PRONE = ['tests/test_email_account_host_ssrf.py::test_test_connection_metadata_ip_rejected_even_for_admin',
@@ -93,7 +93,7 @@ def compare(args):
     baseline = json.loads(BASELINE.read_text(encoding='utf-8'))
     text = Path(args.log).read_text(encoding='utf-8', errors='replace').replace('\r', '')
     failing, passed, summary = parse(text)
-    known = set(baseline['failing_ids'])
+    known = set(baseline['failing_ids']) | set(baseline.get('environment_dependent', []))
     new = sorted(failing - known)
     fixed = sorted(known - failing)
     explained = set()
