@@ -20,6 +20,11 @@ class Base(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         base = Path(self.tmp.name)
+        self.profile = base / 'profile'
+        self.profile.mkdir()
+        patcher = mock.patch.object(Path, 'home', return_value=self.profile)         # the temp folder lives under the real AppData
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.root = base / 'component'
         self.home = base / 'gateway-home'
         self.agent = base / 'agent'
@@ -37,6 +42,11 @@ class Base(unittest.TestCase):
     def save(self, config):
         self.component.config_path.write_text(json.dumps(config), encoding='utf-8')
         self.config = config
+
+    def repo(self, *parts):
+        folder = Path(self.tmp.name).joinpath(*parts)
+        (folder / '.git').mkdir(parents=True)
+        return folder
 
     def release(self, name, state):
         folder = self.component.directory / 'releases' / name
@@ -75,10 +85,8 @@ class GatewayEnvironment(Base):
 
     def test_write_roots_override_the_operator_variable_only_when_set(self):
         self.assertEqual(self.component.gateway_environment(self.config)['HERMES_WRITE_SAFE_ROOT'], r'C:\operator-broad')
-        project = Path(self.tmp.name) / 'projects' / 'a'
-        project.mkdir(parents=True)
-        other = Path(self.tmp.name) / 'projects' / 'b'
-        other.mkdir()
+        project = self.repo('projects', 'a')
+        other = self.repo('projects', 'b')
         self.component.set_write_roots(add=[str(project), str(other)])
         self.assertEqual(self.component.gateway_environment(self.component.config())['HERMES_WRITE_SAFE_ROOT'], os.pathsep.join([str(project), str(other)]))
         self.component.set_write_roots(clear=True)
@@ -93,9 +101,60 @@ class WriteRoots(Base):
                 self.component.set_write_roots(add=[str(bad)])
         self.assertEqual(self.component.write_roots(), [])
 
+    def test_only_the_exact_top_folder_of_a_repository_is_accepted(self):
+        parent = Path(self.tmp.name) / 'Project'
+        child = self.repo('Project', 'App')
+        (child / 'src').mkdir()
+        for bad in (parent, child / 'src'):
+            with self.assertRaises(ComponentError, msg=str(bad)) as caught:
+                self.component.set_write_roots(add=[str(bad)])
+            self.assertIn('top folder of a Git repository', str(caught.exception))
+        self.assertEqual(self.component.set_write_roots(add=[str(child)]), [os.path.normpath(str(child))])
+
+    def test_the_live_installation_and_login_folders_can_never_be_roots(self):
+        live = self.repo('live-odysseus')
+        worktree = Path(self.tmp.name) / 'live-odysseus' / 'integration' / 'wt'
+        worktree.mkdir(parents=True)
+        admin = live / '.git' / 'worktrees' / 'wt'
+        admin.mkdir(parents=True)
+        (worktree / '.git').write_text(f'gitdir: {admin}\n', encoding='utf-8')
+        self.component.application_root = worktree
+        profile = Path(self.tmp.name) / 'profile'
+        (profile / '.codex' / '.git').mkdir(parents=True)
+        (profile / '.claude' / 'proj' / '.git').mkdir(parents=True)
+        (profile / 'AppData' / 'Local' / 'x' / '.git').mkdir(parents=True)
+        ok = self.repo('profile', 'source', 'repos', 'adkar')
+        with mock.patch.object(Path, 'home', return_value=profile):
+            for bad in (live, worktree, profile / '.codex', profile / '.claude' / 'proj', profile / 'AppData' / 'Local' / 'x', profile):
+                with self.assertRaises(ComponentError, msg=str(bad)):
+                    self.component.set_write_roots(add=[str(bad)])
+            self.assertEqual(self.component.set_write_roots(add=[str(ok)]), [os.path.normpath(str(ok))])
+
+    def test_inspection_is_read_only_and_describes_worktrees_and_btrfs(self):
+        main = self.repo('main-repo')
+        (main / '.git' / 'HEAD').write_text('ref: refs/heads/codex/windows-tauri\n', encoding='utf-8')
+        admin = main / '.git' / 'worktrees' / 'Mobile'
+        admin.mkdir(parents=True)
+        (admin / 'HEAD').write_text('ref: refs/heads/codex/android-mobile\n', encoding='utf-8')
+        linked = Path(self.tmp.name) / 'elsewhere' / 'Mobile'
+        linked.mkdir(parents=True)
+        (linked / '.git').write_text(f'gitdir: {admin}\n', encoding='utf-8')
+        snapshot = lambda: sorted((str(p), p.stat().st_mtime_ns) for p in Path(self.tmp.name).rglob('*'))
+        before = snapshot()
+        with mock.patch.object(WebappComponent, '_filesystem', return_value='Btrfs'):
+            plain = self.component.inspect_root(main)
+            worktree = self.component.inspect_root(linked)
+        self.assertEqual(snapshot(), before)
+        self.assertEqual((plain['kind'], plain['branch'], plain['problem']), ('repository', 'codex/windows-tauri', None))
+        self.assertEqual((worktree['kind'], worktree['branch'], worktree['problem']), ('linked worktree', 'codex/android-mobile', None))
+        self.assertTrue(any('OUTSIDE the folder' in note for note in worktree['notes']))
+        self.assertTrue(all(any('Btrfs' in note for note in r['notes']) for r in (plain, worktree)))
+        plain_folder = Path(self.tmp.name) / 'plain'
+        plain_folder.mkdir()
+        self.assertIn('not the top folder', self.component.inspect_root(plain_folder)['problem'])
+
     def test_adding_removing_and_duplicates(self):
-        project = Path(self.tmp.name) / 'work' / 'p'
-        project.mkdir(parents=True)
+        project = self.repo('work', 'p')
         self.component.set_write_roots(add=[str(project)])
         self.component.set_write_roots(add=[str(project).upper()])
         self.assertEqual(len(self.component.write_roots()), 1)

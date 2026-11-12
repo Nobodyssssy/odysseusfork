@@ -15,8 +15,9 @@ Production is unchanged and nothing is pushed. Everything below was done in the 
 ## 1. Writable roots
 The managed gateway now has its own list, set with `hermes-webapp-component.py roots --add-root <folder>` (`--remove-root`, `--clear-roots`).
 It is passed to the gateway as `HERMES_WRITE_SAFE_ROOT` and does **not** change your Windows user variable or the old WebUI. With no list, the gateway
-inherits the operator variable as before. Refused: drive roots, your whole profile folder or a parent of it, Windows/Program Files, the Hermes install,
-the gateway home and the Odysseus component folder. Settings survive a rebuilt release. A running gateway needs a restart to pick up a change.
+inherits the operator variable as before. A root must be the exact top folder of one Git repository (`E:\Project` or a sub-folder is refused). Also refused: drive roots, your whole profile folder or a parent of it,
+Windows/Program Files, `AppData`, `.claude`, `.codex`, `.ssh`, `.aws`, `.gnupg`, the Hermes install, the gateway home, the Odysseus component folder, and the running Odysseus installation
+(including the main checkout when it runs from a worktree). `roots --check-root <folder>` reports on a candidate without changing anything. Settings survive a rebuilt release. A running gateway needs a restart to pick up a change.
 Which folders to list is your decision; none has been added.
 
 ## 2. The seven skills (63 of 70 listed)
@@ -40,7 +41,8 @@ Nothing is lost or mis-migrated. Not changed: editing those skills would be a lo
 - The gateway runs as you, so it can find your Claude (`~/.claude`) and Codex (`~/.codex`) logins. Measured with the pinned agent: unprotected, both paths resolve to your real login
   files; with the component's setting they resolve to empty folders (Claude CLI reports `loggedIn: false` there; your real credential file untouched).
 - Default is **isolated**. To use a subscription on purpose: `hermes-webapp-component.py logins --allow claude` (and/or `codex`), then restart the gateway. `--deny` reverts. `status` shows the state.
-  An allowed login is readable by anything the agent runs as you, which is the same-user limit in section 7.
+  Correction to an earlier sentence: isolation only stops Hermes's own provider code from finding the logins. Any command the agent runs, and any other program running as you, can read
+  `~/.claude/.credentials.json` and `~/.codex/auth.json` either way (section 7). When Claude is allowed the gateway can also refresh the single-use OAuth token and rewrite that file; the old Hermes already does.
 
 ## 5. WebSocket dependency
 Production venv: Python 3.12.10, uvicorn 0.54.0, **no** `websockets`, so `ws=auto` selects nothing and Projects WebSockets would fail. Staged wheel `websockets-17.4-cp312-cp312-win_amd64.whl`

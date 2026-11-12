@@ -51,3 +51,13 @@ The route guard (`webapp-route-guard.patch`) and the grant gate close the *web* 
 ## Decision requested later (not now)
 
 Do you want option A? It needs a one-time administrator session: either you run a short, reviewed script I prepare (create user, ACLs, scheduled task) or you do the equivalent by hand. I will not request elevation or run anything elevated myself.
+
+## Credentials on this PC: what is and is not protected
+
+Claude Code and Codex keep their logins in your profile (`~/.claude/.credentials.json`, `~/.codex/auth.json`). The managed gateway and everything it starts run as you.
+
+- **Not protected, in any configuration:** a shell command run by the agent (or by the terminal pane, an MCP server or any script) can read those two files. The Odysseus route guard, the write roots and the blocked-folder list do not restrict reads of arbitrary files by a process running as you.
+- **What the `logins` setting changes:** only Hermes's own provider code. `isolated` points `CLAUDE_CONFIG_DIR` and `CODEX_HOME` at empty folders so the gateway cannot use your subscriptions by accident; `allowed` leaves them, which is the current behaviour of your existing Hermes. Allowed means the gateway may use the login and, for Claude, refresh the OAuth token and rewrite the file (refresh is serialised across Hermes processes by a lock keyed to the credential file, not with `claude.exe` itself).
+- **Where the Claude and Codex logins are never copied:** managed component releases, migration bundles (auth files and credential values are excluded, asserted by tests), Odysseus/Hermes backups (the `~/.claude` and `~/.codex` folders are not in the backup scope), and project folders.
+- **What the existing full backup DOES contain:** Hermes `.env` (provider API keys), Hermes `auth.json` (OAuth logins), Odysseus `.env` and the old WebUI signing key, because a restore needs them. That is stated in the snapshot's own manifest. The backup folder (`F:\Odysseus-Backups`) is plain files readable by your account, so it carries the same same-user exposure as the originals. Whether to keep that is an open decision in `hermes-production-cutover.md`.
+- **What would close it:** the separate Windows account described above. Until then, treat anything the agent can run as able to read your subscription logins.

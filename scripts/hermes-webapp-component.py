@@ -15,6 +15,7 @@ from src.hermes_component import ComponentError
 from src.hermes_component_runtime import operator_environment
 from src.hermes_webapp_component import WebappComponent
 from src.runtime_paths import get_hermes_component_root
+from src.hermes_webapp_component import LOGIN_WARNING
 
 
 def main(argv=None):
@@ -25,6 +26,7 @@ def main(argv=None):
     parser.add_argument('--add-root', action='append', default=[], help='roots: a folder the managed gateway may write to (its own HERMES_WRITE_SAFE_ROOT)')
     parser.add_argument('--remove-root', action='append', default=[], help='roots: stop allowing a folder')
     parser.add_argument('--clear-roots', action='store_true', help='roots: back to the operator HERMES_WRITE_SAFE_ROOT')
+    parser.add_argument('--check-root', action='append', default=[], help='roots: read-only report on a candidate folder (repository root? filesystem? worktree? refused and why); changes nothing')
     parser.add_argument('--allow', action='append', default=[], help='logins: claude or codex; let the gateway use that tool\'s own login (default: isolated)')
     parser.add_argument('--deny', action='append', default=[], help='logins: claude or codex; isolate that login again')
     parser.add_argument('--rebuild', action='store_true', help='ensure/repair: rebuild the release even if it verifies (about 12 minutes)')
@@ -69,11 +71,14 @@ def main(argv=None):
                 component.remove_blocked_folder(item)
             payload = {'blocked': component.blocked_folders()}
         elif args.action in ('roots', 'logins'):
-            if args.action == 'roots':
+            if args.action == 'roots' and args.check_root:
+                payload = {'checks': [component.inspect_root(item) for item in args.check_root]}
+            elif args.action == 'roots':
                 roots = component.set_write_roots(args.add_root, args.remove_root, args.clear_roots) if (args.add_root or args.remove_root or args.clear_roots) else component.write_roots()
                 payload = {'write_roots': roots or None, 'inherits_operator_variable': not roots}
             else:
                 payload = {'logins': component.set_logins(args.allow, args.deny) if (args.allow or args.deny) else component.logins()}
+                payload['warning'] = LOGIN_WARNING
             if (args.add_root or args.remove_root or args.clear_roots or args.allow or args.deny) and component.status().get('state') == 'ready':
                 payload['restart_required'] = 'the running gateway keeps its old settings until it is restarted'
         else:

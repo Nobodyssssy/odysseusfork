@@ -1,0 +1,35 @@
+{
+ "_comment": "Decisions for the production cutover. Only 'approved_write_roots' and 'logins_at_cutover' are ever applied. 'awaiting_decision' entries are shown by the plan and NEVER applied until you move them into the approved list.",
+ "version": 1,
+ "approved_write_roots": [
+  "E:\\Project\\Sahib-Android",
+  "E:\\Project\\Mihakk"
+ ],
+ "awaiting_decision": {
+  "Sahib Desktop": {
+   "candidate": "C:\\Users\\Protagonist\\source\\repos\\adkar",
+   "evidence": [
+    "main checkout of the Sahib repository (remote origin Nobodyssssy/sahib), branch codex/windows-tauri, the Tauri desktop line",
+    "the Sahib-Android worktree is a linked worktree of it",
+    "already listed in your current HERMES_WRITE_SAFE_ROOT"
+   ],
+   "not_proof": "no recorded Hermes session names it as Sahib Desktop; confirm before it is approved"
+  },
+  "Masar": {
+   "candidate": null,
+   "evidence": [
+    "no repository by that name under E:\\Project or C:\\Users\\Protagonist\\source\\repos",
+    "no recorded session or WebUI project folder points at it"
+   ]
+  }
+ },
+ "logins_at_cutover": [
+  "claude",
+  "codex"
+ ],
+ "gateway_port": 9130,
+ "hermes_python": "C:\\Users\\Protagonist\\AppData\\Local\\hermes\\installs\\562e58e2ea9aca80\\environments\\6eff8cc60cb848909fbabec0b09c88c2\\venv\\Scripts\\python.exe",
+ "backup_dir": "F:\\Odysseus-Backups",
+ "old_webui_port": 8787,
+ "deploy_branch": "feature/webapp-proxy"
+}

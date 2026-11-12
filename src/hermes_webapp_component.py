@@ -47,6 +47,10 @@ _RELEASE = re.compile(r'[0-9a-f]{12}')
 # them. 'isolated' (the default) points each at an empty folder; 'allowed' leaves them alone, which is a deliberate choice recorded in the config.
 LOGIN_TOOLS = {'claude': 'CLAUDE_CONFIG_DIR', 'codex': 'CODEX_HOME'}
 FAILED_RELEASES_KEPT = 2
+LOGIN_WARNING = (
+    'Isolation only stops Hermes\'s own provider code from finding these logins; it is not a security boundary. Commands the agent runs, and any other '
+    'program running as you, can read ~/.claude/.credentials.json and ~/.codex/auth.json either way. When a login is allowed, the gateway may also refresh '
+    'the Claude OAuth token and rewrite ~/.claude/.credentials.json (the old Hermes already does this); the gateway keeps no copy anywhere else.')
 _SECRET_NAME = re.compile(r'KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL', re.I)
 # What the gateway process is given. Odysseus' own environment (provider keys, session secrets) is NOT passed on: the agent's shell inherits this.
 _GATEWAY_ENV = ('SystemRoot', 'SYSTEMROOT', 'SystemDrive', 'windir', 'ComSpec', 'PATHEXT', 'PATH', 'OS', 'USERNAME', 'USERDOMAIN', 'COMPUTERNAME',
@@ -809,9 +813,73 @@ class WebappComponent:
     def write_roots(self):
         return list((self.config() or {}).get('write_roots') or [])
 
-    def root_problem(self, path, config):
-        """Why ``path`` may not be a write root of the gateway, or None."""
-        candidate = Path(path)
+    # Folders under the user profile that hold logins or keys: never a write root, whatever else is true.
+    NEVER_UNDER_PROFILE = ('.claude', '.codex', '.ssh', '.aws', '.gnupg', 'AppData')
+
+    def _odysseus_trees(self):
+        """The running Odysseus install and, when it is a linked worktree, the main checkout it belongs to (the live installation)."""
+        trees = [Path(self.application_root)]
+        marker = Path(self.application_root) / '.git'
+        try:
+            if marker.is_file():
+                text = marker.read_text(encoding='utf-8').strip()
+                if text.startswith('gitdir:'):
+                    admin = Path(text.split(':', 1)[1].strip())
+                    if admin.parent.name == 'worktrees':
+                        trees.append(admin.parent.parent.parent)
+        except OSError:
+            pass
+        return trees
+
+    @staticmethod
+    def _filesystem(path):
+        if os.name != 'nt':
+            return 'unknown'
+        import ctypes
+        anchor = os.path.splitdrive(os.path.realpath(path))[0] + '\\'
+        buffer = ctypes.create_unicode_buffer(64)
+        ok = ctypes.windll.kernel32.GetVolumeInformationW(anchor, None, 0, None, None, None, buffer, 64)
+        return buffer.value if ok else 'unknown'
+
+    def inspect_root(self, path):
+        """Read-only description of a candidate write root: files are read (``.git``, ``HEAD``), nothing is listed, scanned, run or written."""
+        candidate = Path(str(path))
+        report = {'path': str(path), 'exists': candidate.is_dir(), 'git_root': False, 'kind': None, 'branch': None, 'git_dir': None, 'common_git_dir': None,
+                  'filesystem': self._filesystem(candidate) if candidate.is_dir() else None, 'notes': [], 'problem': None}
+        marker = candidate / '.git'
+        git_dir = None
+        if marker.is_dir():
+            report.update(git_root=True, kind='repository')
+            git_dir = marker
+            report['git_dir'] = report['common_git_dir'] = str(marker)
+        elif marker.is_file():
+            try:
+                text = marker.read_text(encoding='utf-8').strip()
+            except OSError:
+                text = ''
+            if text.startswith('gitdir:'):
+                git_dir = Path(text.split(':', 1)[1].strip())
+                report.update(git_root=True, kind='linked worktree', git_dir=str(git_dir))
+                common = git_dir.parent.parent if git_dir.parent.name == 'worktrees' else git_dir
+                report['common_git_dir'] = str(common)
+                if os.path.normcase(os.path.realpath(common)).startswith(os.path.normcase(os.path.realpath(candidate)) + os.sep):
+                    pass
+                else:
+                    report['notes'].append(f'Git data of this worktree lives OUTSIDE the folder, in {common}: a commit there also writes to that repository (the route guard checks the working folder only)')
+        if git_dir is not None:
+            try:
+                head = (git_dir / 'HEAD').read_text(encoding='utf-8').strip()
+                report['branch'] = head[len('ref: refs/heads/'):] if head.startswith('ref: refs/heads/') else f'detached {head[:8]}'
+            except OSError:
+                pass
+        if (report['filesystem'] or '').lower() == 'btrfs':
+            report['notes'].append('Btrfs (WinBtrfs): heavy writes (large checkouts, builds, git gc) can trigger the known driver freeze; keep such work off this drive')
+        report['problem'] = self.root_problem(path, self.config() or {'home': '', 'url': ''}, _report=report)
+        return report
+
+    def root_problem(self, path, config, _report=None):
+        """Why ``path`` may not be a write root of the gateway, or None. A write root must be the exact top folder of a Git repository."""
+        candidate = Path(str(path))
         if not candidate.is_absolute() or not candidate.is_dir():
             return 'must be an existing folder with an absolute path'
         real = Path(os.path.realpath(candidate))
@@ -822,12 +890,15 @@ class WebappComponent:
         profile = norm(Path.home())
         if norm(real) == profile or profile.startswith(norm(real) + os.sep):
             return 'is your whole user profile folder or a parent of it; name the project folders instead'
-        forbidden = [self.root, config['home']]
+        if not ((candidate / '.git').is_dir() or (candidate / '.git').is_file()):
+            return 'is not the top folder of a Git repository (a write root is one repository, never a parent folder or a sub-folder)'
+        forbidden = [self.root, config.get('home') or self.root, *self._odysseus_trees()]
         for variable in ('SystemRoot', 'ProgramFiles', 'ProgramFiles(x86)', 'ProgramData'):
             if self.environment.get(variable):
                 forbidden.append(self.environment[variable])
         if self.environment.get('LOCALAPPDATA'):
             forbidden.append(Path(self.environment['LOCALAPPDATA']) / 'hermes')
+        forbidden += [Path.home() / name for name in self.NEVER_UNDER_PROFILE]
         for item in forbidden:
             if inside(real, item):
                 return f'is inside {item}, which the gateway must not be able to rewrite'
