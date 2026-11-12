@@ -44,7 +44,12 @@ class GrantError(Exception):
 
 
 class GrantDenied(GrantError):
-    """The request is refused (generic on purpose: no oracle for which condition failed)."""
+    """The request is refused (generic on purpose: no oracle for which condition failed). ``reason`` is a short code for the server log only; it is never sent
+    to the browser."""
+
+    def __init__(self, message='refused', reason='refused'):
+        super().__init__(message)
+        self.reason = reason
 
 
 class GrantStoreError(GrantError):
@@ -170,22 +175,24 @@ class GrantStore:
         """Redeem a ticket. Returns ``(grant_secret_or_None, target, max_age)``: None means the browser already holds a live grant for the same
         Odysseus session and keeps it (no new cookie, no accumulation). The ticket is consumed whatever the outcome."""
         if not (isinstance(ticket, str) and SECRET_PATTERN.match(ticket)):
-            raise GrantDenied('refused')
+            raise GrantDenied('refused', 'ticket-malformed')
         with self._lock:
             record = self._tickets.pop(digest(ticket), None)
             now = self._clock()
-            if record is None or record['exp'] <= now:
-                raise GrantDenied('refused')
+            if record is None:
+                raise GrantDenied('refused', 'ticket-unknown-or-already-used')
+            if record['exp'] <= now:
+                raise GrantDenied('refused', 'ticket-expired')
             info = self._live(record['session'], record['user'])
             if not info:
-                raise GrantDenied('refused')
+                raise GrantDenied('refused', 'odysseus-session-not-live')
             if isinstance(presented, str) and SECRET_PATTERN.match(presented):
                 existing = self._grants.get(digest(presented))
                 if existing and existing['session'] == record['session'] and existing['user'] == record['user'] and existing['expires'] > now:
                     return None, record['target'], int(existing['expires'] - now)
             self._grants = {key: g for key, g in self._grants.items() if g['expires'] > now}
             if len(self._grants) >= self._max_total:
-                raise GrantDenied('refused')
+                raise GrantDenied('refused', 'grant-capacity')
             mine = sorted((g['created'], key) for key, g in self._grants.items() if g['session'] == record['session'])
             while len(mine) >= self._max_per_session:
                 self._revoke_key(mine.pop(0)[1], 'evicted')

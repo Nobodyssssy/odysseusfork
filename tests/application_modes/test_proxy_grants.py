@@ -4,7 +4,10 @@ Store tests use a fake Odysseus session manager and an injected clock. Proxy tes
 gateway (and, for streams and slow responses, a small HTTP upstream) and drive it over real sockets, including WebSockets."""
 import asyncio
 import http.client
+import base64
+import hashlib
 import json
+import re
 import os
 from pathlib import Path
 import secrets
@@ -630,6 +633,25 @@ class GateTests(GateBase):
         self.assertEqual(self.enter(fresh, method='HEAD')[0], 405)
         self.assertEqual(self.enter(fresh)[0], 303)                                                     # none of the refused attempts consumed the real ticket
         self.assertEqual(self.gateway.seen(), [])
+
+    def test_a_refused_hand_over_recovers_by_itself_without_relaxing_anything(self):
+        token = self.sessions.login('alice')
+        ticket = self.store.create_ticket(token, 'alice', TARGET)
+        status, headers, body = self.enter(ticket, referer=None)                                         # refused before the ticket is read
+        page = body.decode()
+        self.assertEqual(status, 403)
+        self.assertNotIn('set-cookie', headers)
+        self.assertIn('text/html', headers['content-type'])
+        self.assertEqual(headers['cache-control'], 'no-store')
+        script = re.search(r'<script>(.*)</script>', page, re.S).group(1)
+        digest_ = base64.b64encode(hashlib.sha256(script.encode()).digest()).decode()
+        self.assertIn(f"script-src 'sha256-{digest_}'", headers['content-security-policy'])             # only this script may run
+        self.assertIn("default-src 'none'", headers['content-security-policy'])
+        self.assertIn(f'data-back="http://localhost:{self.port}/"', page)                                # always the Odysseus origin on this port
+        self.assertNotIn(ticket, page)
+        self.assertEqual(self.enter(ticket)[0], 303)                                                     # the unspent ticket still works, which is what the reload relies on
+        spent = self.enter(ticket, referer='default')                                                    # now spent: the same page, so nothing reveals which check refused
+        self.assertEqual((spent[0], spent[2]), (403, body))
 
     def test_enter_on_the_wrong_host_or_with_forwarding_headers(self):
         token = self.sessions.login('alice')

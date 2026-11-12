@@ -33,6 +33,8 @@ The proxy keeps no cookies: its shared HTTP client would otherwise store a Herme
 requests from any local process. This is not a security boundary beyond the checks above; Hermes keeps its own auth.
 """
 import asyncio
+import hashlib
+import base64
 from dataclasses import dataclass
 import logging
 import re
@@ -42,7 +44,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from src.hermes_grants import ENTER_PATH, ENTERED_COOKIE, GRANT_COOKIE, GrantError
+from src.hermes_grants import ENTER_PATH, ENTERED_COOKIE, GRANT_COOKIE, GrantDenied, GrantError
 
 PROXY_HOST = 'hermes.localhost'
 MODES = ('webui', 'gateway')
@@ -58,6 +60,33 @@ _ERROR_HEADERS = [(b'content-type', b'text/plain; charset=utf-8'), (b'cache-cont
                   (b'x-content-type-options', b'nosniff'), (b'x-frame-options', b'DENY'),
                   (b'content-security-policy', b"default-src 'none'; frame-ancestors 'none'")]
 _SAFE_METHODS = {'GET', 'HEAD', 'OPTIONS'}
+
+# What a browser sees when the hand-over from Odysseus is refused. Every refusal returns this same page (no oracle for which check failed) and it recovers by
+# itself, in at most three steps within 30 seconds: reload once (a refusal before the ticket was read leaves it unspent, which is what a manual hard refresh
+# relies on), then go back to Odysseus once for a fresh ticket (the ticket was spent or expired), then stop and show the message. It changes no check.
+_ENTER_SCRIPT = ("(function(){var K='odysseus.enterRetry',now=Date.now(),s={stage:0,t:0},d=document.body.dataset,"
+                 "give=function(){document.getElementById('w').hidden=true;document.getElementById('m').hidden=false};"
+                 "try{var r=JSON.parse(sessionStorage.getItem(K)||'null');if(r&&now-r.t<30000)s=r}catch(e){}"
+                 "if(s.stage>=2)return give();"
+                 "try{var v=JSON.stringify({stage:s.stage+1,t:s.stage?s.t:now});sessionStorage.setItem(K,v);if(sessionStorage.getItem(K)!==v)throw 0}catch(e){return give()}"
+                 "if(s.stage===0)location.reload();else location.replace(d.back+'?open=projects')})()")
+_ENTER_SCRIPT_HASH = base64.b64encode(hashlib.sha256(_ENTER_SCRIPT.encode()).digest()).decode()
+_ENTER_MESSAGE = 'Could not open Hermes from Odysseus. Return to Odysseus and choose Projects again.'
+
+
+def _enter_page(port):
+    back = f'http://localhost:{int(port)}/'
+    html = ('<!doctype html><html lang="en"><meta charset="utf-8"><meta name="color-scheme" content="light dark"><title>Opening Hermes</title>'
+            f'<body data-back="{back}"><p id="w">Opening Hermes…</p><p id="m" hidden>Could not open Hermes from Odysseus. '
+            f'<a href="{back}">Return to Odysseus</a> and choose Projects again.</p>'
+            f'<noscript><p>Could not open Hermes from Odysseus. <a href="{back}">Return to Odysseus</a> and choose Projects again.</p></noscript>'
+            f'<script>{_ENTER_SCRIPT}</script>')
+    return html.encode('utf-8')
+
+
+_ENTER_HEADERS = [(b'content-type', b'text/html; charset=utf-8'), (b'cache-control', b'no-store'), (b'pragma', b'no-cache'),
+                  (b'x-content-type-options', b'nosniff'), (b'x-frame-options', b'DENY'), (b'referrer-policy', b'no-referrer'),
+                  (b'content-security-policy', f"default-src 'none'; script-src 'sha256-{_ENTER_SCRIPT_HASH}'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'".encode())]
 _LABEL = r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?'
 _NAME = re.compile(rf'^(?:{_LABEL}\.)*localhost$')
 _ORIGIN = re.compile(rf'^https?://(?:{_LABEL}\.)*{_LABEL}(?::[0-9]{{1,5}})?$')
@@ -334,42 +363,53 @@ class HermesHostProxy:
                     'headers': _ERROR_HEADERS + list(extra) + [(b'content-length', str(len(message)).encode())]})
         await send({'type': 'http.response.body', 'body': message})
 
+    async def _deny_enter(self, scope, send):
+        body = _enter_page(self._port(scope))
+        await send({'type': 'http.response.start', 'status': 403, 'headers': _ENTER_HEADERS + [(b'content-length', str(len(body)).encode())]})
+        await send({'type': 'http.response.body', 'body': body})
+
     async def _enter(self, scope, receive, send):
         """GET /__odysseus/enter?ticket=...: redeem a one-use ticket, set this browser's grant cookie, redirect to the server-held target.
 
         Everything here is checked before the ticket is looked at, and every failure is the same generic 403 (no oracle)."""
         refusal = self._refuse(scope, websocket=False)
         if refusal:
+            log.warning('enter refused before the ticket: %s', refusal[1].decode('latin-1'))
             return await self._fail(send, *refusal)
         headers = dict(scope['headers'])
-        deny = (403, b'Could not open Hermes from Odysseus. Return to Odysseus and choose Projects again.', [])
+        deny = None
         if scope['method'] != 'GET':
             return await self._fail(send, 405, b'Method not allowed.', [(b'allow', b'GET')])
-        if headers.get(b'sec-fetch-mode', b'navigate') != b'navigate' or headers.get(b'sec-fetch-dest', b'document') != b'document':
-            return await self._fail(send, *deny)
+        mode, dest = headers.get(b'sec-fetch-mode', b'navigate'), headers.get(b'sec-fetch-dest', b'document')
+        if mode != b'navigate' or dest != b'document':
+            log.warning('enter refused before the ticket: reason=fetch-metadata mode=%s dest=%s', mode.decode('latin-1')[:20], dest.decode('latin-1')[:20])
+            return await self._deny_enter(scope, send)
         if self.policy.require_enter_referer:
-            referer = urlsplit(headers.get(b'referer', b'').decode('latin-1'))
+            raw_referer = headers.get(b'referer', b'').decode('latin-1')
+            referer = urlsplit(raw_referer)
             try:
                 ok = (referer.scheme == 'http' and not referer.username and not referer.password
                       and f'http://{referer.hostname}:{referer.port}' in self.policy.odysseus_origins(self._port(scope)))
             except ValueError:
                 ok = False
             if not ok:
-                return await self._fail(send, *deny)
+                seen = 'absent' if not raw_referer else f'{referer.scheme}://{referer.hostname}:{referer.port}'[:60]
+                log.warning('enter refused before the ticket: reason=referer seen=%s site=%s', seen, headers.get(b'sec-fetch-site', b'-').decode('latin-1')[:20])
+                return await self._deny_enter(scope, send)
         query = scope.get('query_string', b'').decode('latin-1')
         pairs = [part.partition('=') for part in query.split('&') if part]
         tickets = [value for key, _, value in pairs if key == 'ticket']
         values = set(self._cookie_values(scope))
         try:
             if len(tickets) != 1 or len(pairs) != 1:
-                raise GrantError('refused')
+                raise GrantDenied('refused', 'query-shape')
             secret, target, max_age = self.grants.exchange(tickets[0], next(iter(values)) if len(values) == 1 else None)
-        except GrantError:
-            log.warning('grant exchange refused')
-            return await self._fail(send, *deny)
+        except GrantError as exc:
+            log.warning('grant exchange refused: reason=%s', getattr(exc, 'reason', 'refused'))
+            return await self._deny_enter(scope, send)
         except Exception:
             log.error('grant exchange failed; denying', exc_info=True)
-            return await self._fail(send, *deny)
+            return await self._deny_enter(scope, send)
         out = [(b'location', target.encode('latin-1')), (b'cache-control', b'no-store'), (b'pragma', b'no-cache'), (b'referrer-policy', b'no-referrer'),
                (b'x-content-type-options', b'nosniff'), (b'content-length', b'0')]
         out.append((b'set-cookie', f'{ENTERED_COOKIE}=1; Path=/; SameSite=Lax; Max-Age=30'.encode('latin-1')))      # a hint, not a credential; the grant cookie follows it
