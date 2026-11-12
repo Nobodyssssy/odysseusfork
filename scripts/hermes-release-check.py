@@ -18,9 +18,10 @@ import time
 APP = Path(__file__).resolve().parents[1]
 BASELINE = APP / 'config' / 'release-baseline.json'
 SKIP = ['--ignore=tests/smoke', '--ignore=tests/test_review_calendar_invitation.py']
-# Passes alone in about 30 s (it waits on a connection to a link-local address) but never returns inside a parallel run, which then waits forever on that
-# one worker. It is run on its own, with a hard limit, after the parallel run. It is a baseline test, not one of the migration's.
-HANG_PRONE = ['tests/test_email_account_host_ssrf.py::test_test_connection_metadata_ip_rejected_even_for_admin']
+# Both are baseline failures that open a real connection to a link-local/unresolvable address: on this PC they can wait for minutes or forever, and the
+# parallel run then waits on that one worker. They are run on their own, with a hard limit, after the parallel run. Not part of the migration.
+HANG_PRONE = ['tests/test_email_account_host_ssrf.py::test_test_connection_metadata_ip_rejected_even_for_admin',
+              'tests/test_email_account_host_ssrf.py::test_test_connection_endpoint_dns_rebinding_blocked']
 STALL_SECONDS = 900
 
 
