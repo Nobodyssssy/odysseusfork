@@ -943,10 +943,13 @@ class WebappComponent:
 
     def gateway_environment(self, config):
         env = {key: self.environment[key] for key in _GATEWAY_ENV if key in self.environment}
-        if config.get('write_roots'):                          # this gateway's own, narrower list; the operator's variable (used by the old WebUI) is left alone
-            env['HERMES_WRITE_SAFE_ROOT'] = os.pathsep.join(config['write_roots'])
-        elif 'HERMES_WRITE_SAFE_ROOT' in self.environment:    # otherwise the operator's own write policy, passed through unchanged, never invented
-            env['HERMES_WRITE_SAFE_ROOT'] = self.environment['HERMES_WRITE_SAFE_ROOT']
+        # Deny by default. The agent treats an EMPTY write-root list as "no restriction", and the operator's own variable (used by the
+        # old WebUI) used to be inherited here, which made this gateway able to write to unrelated projects and the Odysseus install.
+        # Now the environment names an empty folder only this component owns; the roots the user granted are read live from this
+        # component's config by the odysseus-workspace-grants plugin, so granting or revoking needs no restart. If that plugin is not
+        # active, the grants simply do not apply and nothing outside the empty folder is writable.
+        env['HERMES_WRITE_SAFE_ROOT'] = str(private_directory(self.directory / 'no-workspace'))
+        env['ODYSSEUS_WORKSPACE_GRANTS'] = str(self.config_path)
         allowed = set(config.get('logins') or [])
         for tool, variable in LOGIN_TOOLS.items():
             if tool not in allowed:

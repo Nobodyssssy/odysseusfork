@@ -1,0 +1,7 @@
+name: odysseus-workspace-grants
+version: 0.1.0
+manifest_version: 2
+kind: standalone
+description: "Odysseus workspace grants: the agent's write roots come from the Odysseus component's validated grant list, re-read on every file call, so granting or revoking a workspace takes effect immediately with no restart. No grant means no writable project. Fail-closed. Not a sandbox: the terminal tool is outside it."
+author: Odysseus
+license: MIT

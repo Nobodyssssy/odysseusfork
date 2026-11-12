@@ -83,14 +83,20 @@ class GatewayEnvironment(Base):
         env = self.component.gateway_environment(self.config)
         self.assertFalse({'ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'GH_TOKEN'} & set(env))
 
-    def test_write_roots_override_the_operator_variable_only_when_set(self):
-        self.assertEqual(self.component.gateway_environment(self.config)['HERMES_WRITE_SAFE_ROOT'], r'C:\operator-broad')
-        project = self.repo('projects', 'a')
-        other = self.repo('projects', 'b')
-        self.component.set_write_roots(add=[str(project), str(other)])
-        self.assertEqual(self.component.gateway_environment(self.component.config())['HERMES_WRITE_SAFE_ROOT'], os.pathsep.join([str(project), str(other)]))
+    def test_gateway_never_inherits_the_operator_write_policy_and_points_at_the_one_grants_file(self):
+        sentinel = str(self.component.directory / 'no-workspace')
+        for roots in ((), (self.repo('projects', 'a'), self.repo('projects', 'b'))):
+            if roots:
+                self.component.set_write_roots(add=[str(r) for r in roots])
+            env = self.component.gateway_environment(self.component.config())
+            self.assertEqual(env['HERMES_WRITE_SAFE_ROOT'], sentinel, 'the environment is always the empty folder; grants are live, not baked in')
+            self.assertNotIn('operator-broad', env['HERMES_WRITE_SAFE_ROOT'])
+            self.assertEqual(env['ODYSSEUS_WORKSPACE_GRANTS'], str(self.component.config_path))
+        self.assertEqual(os.listdir(sentinel), ['.odysseus-private'], 'the deny folder holds nothing but the component\'s own marker')
+        self.assertEqual(len(self.component.write_roots()), 2)
         self.component.set_write_roots(clear=True)
-        self.assertEqual(self.component.gateway_environment(self.component.config())['HERMES_WRITE_SAFE_ROOT'], r'C:\operator-broad')
+        self.assertEqual(self.component.write_roots(), [])
+        self.assertEqual(self.component.gateway_environment(self.component.config())['HERMES_WRITE_SAFE_ROOT'], sentinel)
 
 
 class WriteRoots(Base):

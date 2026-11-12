@@ -515,7 +515,7 @@ class LifecycleTests(ComponentCase):
         self.assertEqual(Path(report['dist']), Path(self.config['bundle']))
         self.assertEqual(Path(report['home']), Path(self.config['home']))
         self.assertFalse(report['secret_visible'])                                  # Odysseus' environment does not reach the agent's shell
-        self.assertEqual(report['safe_root'], self.environment['HERMES_WRITE_SAFE_ROOT'])   # the operator's own policy is passed on, never invented
+        self.assertEqual(Path(report['safe_root']), self.component.directory / 'no-workspace')   # deny by default: the operator's variable is no longer inherited
         self.assertEqual(self.component.start()['state'], 'ready')                  # idempotent
         self.assertEqual(self.component.stop()['state'], 'stopped')
         self.assertEqual(self.component.status()['state'], 'stopped')

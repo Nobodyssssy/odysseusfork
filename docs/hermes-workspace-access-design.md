@@ -47,3 +47,16 @@ Not changed. Proposed fix: a distinct component default that denies project writ
 4. Reuse the ask-policy never-allow list as a separate, later floor.
 
 Does not need building: approval modes, cards, allowlist editor, deny globs, the registry, the Git UI.
+
+
+## Implementation status (branch `feature/workspace-grants`; nothing deployed)
+
+Built and tested in isolation:
+
+- `integrations/hermes-mode/plugins/odysseus-workspace-grants`: rebinds `agent.file_safety.get_safe_write_roots` (the one function the agent uses; an empty result there means "no restriction", so "no workspace" is a folder nothing can live under). It reads the component's own `component.json` `write_roots` whenever the file changes, ignores the environment, re-checks each root (absolute, not a drive root, not the profile folder or a parent), fails closed on a missing, corrupt or wrongly shaped file, runs a self-test at install, and writes `odysseus-workspace-grants.status.json` into the gateway home.
+- Component: `gateway_environment` no longer inherits the operator's `HERMES_WRITE_SAFE_ROOT`. The environment is always the component's empty `no-workspace` folder and `ODYSSEUS_WORKSPACE_GRANTS` points at `component.json`. The `roots` command changes the same file the plugin reads, so there is one list, one validator, and no second database.
+- Tests (`test_workspace_grants.py`, against the pinned agent's real `file_safety`): no grant means nothing writable even with a permissive environment; grant, add, revoke and revoke-all take effect on the next call with no restart; corrupt, wrong-type, wrong-shape and deleted grant files fail closed; drive-root, profile, relative and non-string grants are ignored while credential and Hermes-state denials still win; a junction, `..` and a sibling-prefix folder cannot escape a grant; the status file reports installed and not installed.
+
+Not done (each needs approval): install the plugin into the managed gateway home and enable it in `plugins.enabled` (the component must merge into the list, not replace it); restart the gateway once so it picks up the new environment; the Odysseus endpoint and the Projects chip that show effective permissions; a grant confirmation dialog. Until the plugin is enabled, the new environment alone makes the gateway read-only everywhere except its empty folder.
+
+Known limit: the terminal tool, MCP servers and approved commands are not covered; revoking a grant does not stop a process that is already running.

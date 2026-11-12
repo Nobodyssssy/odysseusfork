@@ -75,11 +75,11 @@ def main(argv=None):
                 payload = {'checks': [component.inspect_root(item) for item in args.check_root]}
             elif args.action == 'roots':
                 roots = component.set_write_roots(args.add_root, args.remove_root, args.clear_roots) if (args.add_root or args.remove_root or args.clear_roots) else component.write_roots()
-                payload = {'write_roots': roots or None, 'inherits_operator_variable': not roots}
+                payload = {'write_roots': roots or None, 'inherits_operator_variable': False, 'applies': 'live, on the next file operation, when the odysseus-workspace-grants plugin is active in the gateway; with no grant (or no plugin) nothing outside the empty no-workspace folder is writable'}
             else:
                 payload = {'logins': component.set_logins(args.allow, args.deny) if (args.allow or args.deny) else component.logins()}
                 payload['warning'] = LOGIN_WARNING
-            if (args.add_root or args.remove_root or args.clear_roots or args.allow or args.deny) and component.status().get('state') == 'ready':
+            if (args.allow or args.deny) and component.status().get('state') == 'ready':
                 payload['restart_required'] = 'the running gateway keeps its old settings until it is restarted'
         else:
             component.disable()
