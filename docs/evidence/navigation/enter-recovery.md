@@ -4,14 +4,14 @@ Symptom: Personal -> Projects showed "Could not open Hermes from Odysseus. Retur
 
 ## What the evidence says
 
-- **The refusal came before the ticket was read.** Production logged nothing for the first failure (a ticket-level refusal always logs `grant exchange refused`), and logged `grant ... issued` for the hard refresh. A refusal before the ticket leaves it unspent (it lives 30 s), which is why the same URL worked on reload. Only two checks run there: `Referer` must be the Odysseus origin, and `Sec-Fetch-Mode/Dest` must be `navigate/document`.
+- **Correction (after deployment).** I first wrote that production logged nothing for the failure. That was wrong: the old code logged the same generic line `grant exchange refused` for *every* ticket-stage refusal, and the production log has such lines at 15:43:32, 15:46:28 and 15:46:33, two of them 5 s apart at a time when no test of mine was running, so they are most likely the user's failed clicks. What the old line cannot say is which refusal it was. A hard refresh of the same URL then worked, which means the ticket was **not** spent, so it was refused before it was redeemed: the old code has exactly two such paths, the `Referer`/`Sec-Fetch-*` checks (which logged nothing) and the query-shape check (`ticket=` not the only parameter, or repeated), which logged the generic line without consuming the ticket. The 15:46 lines therefore point at **query-shape**, but that is an inference, not a measurement.
 - **Not reproduced outside the user's browser.** Firefox 160 (the installed build), clean profile and a replica of the user's profile (prefs, 42 extensions with their settings and granted permissions, no cookies/history), trusted keyboard and mouse input, BFCache returns through the `← Personal` chip, a cold gateway start, 4 consecutive cycles, against the disposable preview: every `enter` request carried `Referer: http://localhost:<port>/`, `Sec-Fetch: cross-site, navigate, document`, and passed.
 - **Not caching, not a service worker, not the cookies, not a race**: the refusal is `no-store`; no service worker is registered; cookie handling happens after the checks; the ticket is minted after the gateway is ready, with 30 s to live.
-- **Unproven:** which of the two headers differed in the user's browser. The production build did not log it. The simulation below reproduces the same signature (silent pre-ticket refusal, same ticket accepted on reload).
+- **Unproven:** which pre-redemption check refused in the user's browser (referer, fetch-metadata or query-shape). The deployed build now logs the reason; the first real failure will name it. The simulations below reproduce the same signature (refused before redemption, same ticket accepted on reload) for the referer case only.
 
 ## Fix (no check weakened)
 
-1. Every refusal logs a reason code and the non-secret facts (`reason=referer seen=absent site=cross-site`, `reason=fetch-metadata mode=... dest=...`, `reason=ticket-unknown-or-already-used|ticket-expired|odysseus-session-not-live|query-shape|ticket-malformed|grant-capacity`). Clients still get one indistinguishable response.
+1. (Deployed 2026-11-12, `1b2d2f80`.) Every refusal logs a reason code and the non-secret facts (`reason=referer seen=absent site=cross-site`, `reason=fetch-metadata mode=... dest=...`, `reason=ticket-unknown-or-already-used|ticket-expired|odysseus-session-not-live|query-shape|ticket-malformed|grant-capacity`). Clients still get one indistinguishable response.
 2. The refusal page recovers by itself, at most three steps within 30 s (state in the tab's `sessionStorage`): reload once, then return to `http://localhost:<port>/?open=projects` for a fresh ticket, then stop and show the message with a link back to Odysseus. The page is served with `script-src 'sha256-...'` for its single script and `default-src 'none'`.
 
 ## Firefox 160 results (clean profile, WebDriver BiDi, trusted input)
@@ -26,3 +26,7 @@ Symptom: Personal -> Projects showed "Could not open Hermes from Odysseus. Retur
 | Logout in Odysseus | Hermes API 200 before, 401 after; the Hermes tab leaves for the Odysseus login |
 
 Tests: `tests/application_modes/test_proxy_grants.py::test_a_refused_hand_over_recovers_by_itself_without_relaxing_anything` plus the existing refusal tests (134 passed across proxy, backend and service-control files). Probes: `tests/desktop-lab/ff_*.py` (need Firefox, `websockets`, a preview).
+
+## Production check after deployment (no login available to the agent)
+
+Real Firefox 160 against `localhost:7000`, bogus tickets, redacted: a normal link click and a typed URL both produce the refusal page, which reloads once, goes back to Odysseus once and ends on the Odysseus login in about 0.2 s; the server log carries `reason=ticket-unknown-or-already-used` / `reason=referer seen=absent site=cross-site`; no ticket value appears anywhere in the log (checked with a byte-offset scan of the new log text). Authenticated Personal <-> Projects cycles on production were left to the user's browser. Note for anyone counting log lines in a script: use a byte offset, not `len(text.split("\n"))`.
