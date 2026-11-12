@@ -1,0 +1,41 @@
+{
+ "browser": "Chromium in the test harness (version not recorded); Firefox and Safari not tested",
+ "personal_restore_via_history_back": {
+  "url_change_s": 0.53,
+  "js_marker_survived": true,
+  "draft_survived": true,
+  "navigation_type": "navigate (same document, not reloaded)"
+ },
+ "projects_restore_via_history": {
+  "restored_from_bfcache": false,
+  "navigation_type": "back_forward",
+  "notRestoredReasons": [
+   "masked",
+   "response-cache-control-no-store",
+   "response-cache-control-no-store-with-js-network-request",
+   "websocket",
+   "websocket-used-with-ccns"
+  ],
+  "webapp_draft_survived_via_own_storage": true
+ },
+ "selector_personal_to_projects_ready_s": [
+  3.3
+ ],
+ "selector_note": "single clean run without fixed waits; earlier 7-14 s figures included fixed sleeps in the test script",
+ "cold_start_via_selector_s": 42.3,
+ "cold_start_via_new_tab_link_s": 32,
+ "services_restart_s": 23.5,
+ "new_tab_link": {
+  "href": "/?open=projects",
+  "target": "_blank",
+  "rel": "noopener",
+  "new_tab_landed_on_projects": true,
+  "query_stripped": true,
+  "first_tab_stayed_personal": true
+ },
+ "unverified": [
+  "Projects via history without a new launch link",
+  "other browsers",
+  "repeat runs (the test browser connection dropped on repeated loops)"
+ ]
+}

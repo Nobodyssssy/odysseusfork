@@ -13,7 +13,7 @@ Branch `feature/webapp-proxy`, local only (nothing pushed or deployed). Evidence
 
 | Requirement | Result |
 |---|---|
-| Projects checks gateway status; starts it if stopped | cold start from the click to the Webapp in about 42 s; with Hermes already running a switch takes 11 to 14 s; a Services restart took about 24 s; the bar shows "Checking Hermes…", then "Starting Hermes…" |
+| Projects checks gateway status; starts it if stopped | cold start from the click to the Webapp in about 42 s; with Hermes already running one clean measurement was 3.3 s to a usable Webapp (earlier 11 to 14 s figures included fixed waits in my test scripts); a Services restart took about 24 s; the bar shows "Checking Hermes…", then "Starting Hermes…" |
 | Reuse a running gateway | switching with Hermes ready did not touch it (no start/stop calls; unit-tested) |
 | States | `ready`, `starting`, `stopped`, `error` (with the gateway's own message), `conflict` (another program on the port: nothing touched), `unavailable`; "busy" is shown as ready plus a count |
 | Failure handling | a failed start is shown, and the next click retries (a bug found by the tests and fixed: the first version blocked retries after an error) |
@@ -32,7 +32,7 @@ Switching is a full page navigation between two origins, so the Webapp page itse
 - sign-in: no prompt (a new one-use launch link is exchanged; the grant cookie is reused)
 - **an agent run in progress: not stopped, not lost.** Leaving mid-stream and returning either re-attaches to the live stream or, if it finished meanwhile, shows the complete saved answer (60 of 60 tokens in both cases)
 
-Not preserved: the exact scroll position and the open right-hand panels of the Webapp. The cost of the reload is about 7 to 11 s per switch. Avoiding it needs the Webapp to run in its own tab (decision for you, below).
+Not preserved on the Projects side: the exact scroll position and open right-hand panels (the page reloads; Chrome refuses to cache it because of `no-store` and open WebSockets). Personal restored from the browser cache with everything intact when returned to with Back. The plan to remove the remaining reload is in `hermes-unified-navigation.md`; **Open Projects in new tab** is now available as an option.
 
 An earlier run that seemed to lose output was a bug in my test stub (it never ended its SSE stream), not the gateway; it is fixed in the lab tools.
 
@@ -68,14 +68,14 @@ From `F:\Odysseus-Backups\desktop-lab` with `unset PYTHONPATH HERMES_HOME`:
 5. Stop: Services > Stop Hermes, then `python tools\preview.py stop`, `python tools\preview.py clean`, stop the stub.
 
 ## Remaining UI problems
-- Each switch reloads the other app (7 to 11 s); scroll position and open panels are not kept.
+- Switching to Projects reloads it (about 3 s measured once); its scroll position and open panels are not kept. See `hermes-unified-navigation.md`.
 - The "active" count is the gateway's "sessions touched in the last five minutes", so Stop can ask for confirmation when nothing is actually running (the wording now says so).
 - The first start after install takes about 42 s with no progress detail beyond "Starting Hermes…".
 - A fresh managed home has no model, so Projects opens the official onboarding; providers must be shared or configured first (provider sync is separate).
 - The picker fix needs a live re-test.
 
 ## Remaining production-migration blockers
-1. `websockets` must be installed in the production Odysseus venv (otherwise gateway mode answers 501 to every WebSocket).
+1. **Measured on this PC:** the production Odysseus venv (`F:\Odysseus\venv`) has uvicorn but neither `websockets` nor `wsproto`, and production starts `uvicorn app:app --host 127.0.0.1 --port 7000` with no `--ws` options. Gateway mode needs `websockets` installed and `--ws websockets` (the preview also passes `--ws-max-size`) or every WebSocket gets a 501. A production change: needs your approval.
 2. Install the managed component for real (clone, build ~12 min) and decide the port; set `ODYSSEUS_HERMES_BACKEND=webapp` (production restart of Odysseus: needs your word).
 3. Provider and model sync into the new gateway home, and copying your Hermes Desktop settings/skills/memory into it (or adopting the existing home instead of managing a new one).
 4. `HERMES_WRITE_SAFE_ROOT` narrowed to your real project folders (your action), and the project folders on Btrfs must be confirmed to honour the guard (not measured).
@@ -91,5 +91,5 @@ From `F:\Odysseus-Backups\desktop-lab` with `unset PYTHONPATH HERMES_HOME`:
 5. **Switch**: with your word, set `ODYSSEUS_HERMES_BACKEND=webapp` and restart Odysseus via the scheduled task. The old Hermes WebUI on 8787 stays installed and running.
 6. **Rollback**: remove the setting and restart Odysseus (Projects disappears or returns to the old WebUI mode); `hermes-webapp-component.py disable` keeps the install; `rollback` returns to the previous release; the WebUI component and its backups are untouched.
 
-## Decision for you
-Keep same-tab switching (simple, one tab, each switch reloads), or open Projects in its own tab (no reload, the Webapp keeps its socket, panels and scroll, at the price of two tabs and an opener relationship that needs `noopener` care)? Same-tab is what is implemented.
+## Navigation decision (made)
+Same-tab stays the default; **Open Projects in new tab** is an optional link; instant state-preserving switching is a core requirement of the final browser and native experience. Approach for each: `hermes-unified-navigation.md`.

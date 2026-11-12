@@ -262,7 +262,17 @@ async function initialize() {
     try { health.textContent = describe(await request(endpoint)); } catch (_) { health.textContent = ''; }
   };
   if (gateway) { health.textContent = describe(status); setInterval(refreshHealth, 15000); document.addEventListener('hermes-state-changed', refreshHealth); }
-  bar.append(selector, ...(gateway ? [] : [providers]), ...(services ? [services] : []), ...(gateway ? [health] : []), message);
+  // Optional convenience: Projects in its own tab. A noopener link to this page with ?open=projects; the new tab runs the same switch below, so the
+  // start-on-demand logic exists once, nothing waits on a click gesture, and this tab (its draft lives in per-tab sessionStorage) is not touched.
+  const newTab = document.createElement('a');
+  newTab.id = 'application-mode-new-tab';
+  newTab.href = `${location.pathname}?open=projects`;
+  newTab.target = '_blank';
+  newTab.rel = 'noopener';
+  newTab.textContent = 'Open Projects in new tab';
+  newTab.title = 'Keep Personal here and open Projects in another tab';
+  newTab.style.cssText = 'margin-left:8px;color:inherit;font-size:.85em;opacity:.75;white-space:nowrap';
+  bar.append(selector, ...(gateway ? [] : [providers]), ...(services ? [services] : []), ...(gateway ? [health, newTab] : []), message);
   document.querySelector('#chat-container').prepend(bar);
   try { await restoreChatState(message); }
   catch (_) { message.textContent = 'The saved draft could not be restored. Your current composer was not changed.'; }
@@ -298,6 +308,11 @@ async function initialize() {
     }
   });
   selector.disabled = false;
+  if (gateway && new URLSearchParams(location.search).get('open') === 'projects') {
+    history.replaceState(history.state, '', location.pathname + location.hash);        // never leave the instruction in the address bar or history
+    selector.value = 'hermes';
+    selector.dispatchEvent(new Event('change'));
+  }
 }
 
 initialize();
