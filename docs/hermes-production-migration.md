@@ -80,14 +80,16 @@ Neither the old WebUI (8787) nor the old gateway is stopped by any step; both ca
 
 *Live (lab):* inventory of your real home (5 s, home unchanged except the running gateway's own writes); bundle with no credential files or values; apply into a throwaway home; verify (13/13 sessions, 10,631 messages, 728 file hashes); the pinned agent reads the migrated database; rollback restores the config byte for byte; the CLI refuses a populated home and a wrong confirm target. *Unit:* 11 tests (classification, secret exclusion, tamper refusal, preflight, rollback).
 
-*Not verified:* the Webapp showing the migrated conversations (needs a running managed gateway on migrated data); provider/model list in the Webapp after apply; Btrfs project folders against the guard; a full restore drill of the Odysseus backup.
+*Rehearsal (lab, 2026-11-12, see `hermes-migration-rehearsal.md`):* the Webapp lists and opens all migrated conversations, continues one with the stub with memory, skills and history in context, shows the migrated MCP server, settings and project folders, and Git and the editor work. *Found:* the managed gateway can use your Claude and Codex logins from your user profile (outside the Hermes home); `ensure` does not recreate a home and `repair` rebuilds.
+
+*Not verified:* real providers, the `E:` repos and Btrfs behaviour against the guard, a full restore drill of the Odysseus backup.
 
 ## 6. Remaining blockers before production
 
 1. `websockets` in the prod venv and `--ws websockets` (GATE).
 2. The 12-minute managed install on production (GATE).
 3. `HERMES_WRITE_SAFE_ROOT` is still broad; narrowing it is your action.
-4. Rehearsal of migrated data in a running managed gateway (step 8).
+4. ~~Rehearsal of migrated data~~ done (`hermes-migration-rehearsal.md`); a rehearsal with a real provider remains your choice.
 5. Same-user code (terminal pane, approved tools, `npx`/`uvx`/script MCP servers, the direct gateway port) is not isolated; see `hermes-windows-isolation.md`.
 6. The ask-policy plugin is not installed in any live home.
 7. Electron, LAN and native packaging are out of scope for this step.

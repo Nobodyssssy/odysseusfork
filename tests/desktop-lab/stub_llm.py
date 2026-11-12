@@ -104,6 +104,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, {'received': len(raw)})
         try:
             body = json.loads(raw or b'{}')
+            try:
+                open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'results', 'stub-last-request.json'), 'wb').write(raw or b'{}')
+            except OSError:
+                pass
         except ValueError:
             return self._send(400, {'error': 'bad json'})
         call, text, entry, _ = decide(body)

@@ -1,0 +1,87 @@
+{
+ "what": "Migration rehearsal on a disposable managed gateway using a copy of the real Hermes home (migrated with scripts/hermes-migrate.py). Screenshots with personal data are NOT in the repo (F:\\Odysseus-Backups\\desktop-lab\\results\\rehearsal-screenshots).",
+ "migration": {
+  "bundle_s": 9.9,
+  "apply_s": 6.3,
+  "sessions": "13/13",
+  "messages": "10685/10685",
+  "file_hashes": "728/728",
+  "credential_files_in_managed_home": 0,
+  "auth_json_copied": false,
+  "api_keys_copied": [],
+  "imported_config_sections_equal_to_live": "23/23 (model as migrated; the running copy was pointed at the stub before the gateway first ran)"
+ },
+ "webapp": {
+  "sessions_listed": "10 with content (the 3 empty sessions are hidden by upstream)",
+  "titles_models_message_counts_match_db": true,
+  "old_session_opens_with_history": true,
+  "long_session_462_messages_renders_s": 3.1,
+  "continue_with_stub": {
+   "worked": true,
+   "context_sent_to_model": {
+    "messages": 8,
+    "memory_lines_in_system_prompt": "3/3 probed",
+    "skills_block": true,
+    "SOUL.md": true,
+    "earlier_turn_of_the_migrated_session": true
+   }
+  },
+  "skills": {
+   "on_disk": 70,
+   "listed_by_api": 63,
+   "not_listed": [
+    "apple-notes",
+    "apple-reminders",
+    "findmy",
+    "imessage (macOS only)",
+    "python-debugpy",
+    "xurl (linux/macos only)",
+    "sdlc-review (declares windows support; reason not determined)"
+   ]
+  },
+  "mcp": {
+   "node_repl": "connected, 4 tools registered"
+  },
+  "scheduled_jobs": 0,
+  "messaging_platforms": "none enabled",
+  "model_picker": "custom Stub Model plus the session recorded model; model switch for a session works",
+  "settings_roundtrip": "Settings > Workspace > Working Directory written to config.yaml"
+ },
+ "project_context": {
+  "per_session_cwd_and_git_repo_root_migrated": true,
+  "webui_project_groupings_converted": false,
+  "e_drive_repos_opened": false
+ },
+ "git_editor": {
+  "editor_save_to_disk": true,
+  "stage_and_commit_from_review_pane": "66b317d",
+  "folder_tree": true
+ },
+ "navigation": {
+  "projects_start_on_demand_s": 24,
+  "projects_ready_with_gateway_running_s": 2.4,
+  "return_to_personal_s": 0.04,
+  "js_marker_and_draft_survived": true,
+  "projects_panels_and_draft_restored_by_webapp": true
+ },
+ "logout": {
+  "A_logout_elsewhere_while_in_projects": "tab went to the Odysseus login by itself (first observation 0.03 s after switching back)",
+  "B_cached_personal_after_logout": "control: while signed in Back restored the cached page with its JS marker; after logout the first observation (0.48 s) was already the login form; stale-flash shorter than that cannot be ruled out",
+  "http": {
+   "proxy_with_valid_hermes_token_no_grant": "401 x-odysseus-grant: required",
+   "direct_gateway_port_same_token": "200 (documented limit)"
+  }
+ },
+ "findings": [
+  "The rehearsal gateway found the user real Claude Code and Codex logins in the user profile (outside the Hermes home) and queried Anthropic usage (picker showed quota) before the profile was isolated. No credentials were copied; .credentials.json was not modified. After isolation (empty USERPROFILE for the gateway) the Anthropic and Codex entries disappeared.",
+  "Resumed sessions use their own recorded model (claude/gpt/longcat/deepseek); the claude provider plugin was disabled for the rehearsal via its command variable.",
+  "Component stop refuses while a session was touched in the last 5 minutes (--force needed in the lab).",
+  "A killed component repair leaves a half-built release; the lab one was removed by hand."
+ ],
+ "not_verified": [
+  "Webapp Plugins tab for installed plugins (config and plugin folders verified instead)",
+  "the 3 e: drive repos and Btrfs behaviour",
+  "real-provider continuation (not done on purpose)",
+  "other browsers"
+ ]
+}
