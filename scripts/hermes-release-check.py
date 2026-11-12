@@ -18,6 +18,10 @@ import time
 APP = Path(__file__).resolve().parents[1]
 BASELINE = APP / 'config' / 'release-baseline.json'
 SKIP = ['--ignore=tests/smoke', '--ignore=tests/test_review_calendar_invitation.py']
+# Passes alone in about 30 s (it waits on a connection to a link-local address) but never returns inside a parallel run, which then waits forever on that
+# one worker. It is run on its own, with a hard limit, after the parallel run. It is a baseline test, not one of the migration's.
+HANG_PRONE = ['tests/test_email_account_host_ssrf.py::test_test_connection_metadata_ip_rejected_even_for_admin']
+STALL_SECONDS = 900
 
 
 def clean_env():
@@ -29,16 +33,37 @@ def clean_env():
 def run(args):
     repo = Path(args.repo)
     log = Path(args.log)
-    command = [args.python, '-m', 'pytest', 'tests', *SKIP, '-n', str(args.workers), '-p', 'no:cacheprovider', '-W', 'ignore', '--tb=line', '-q', '-rfE']
+    command = [args.python, '-m', 'pytest', 'tests', *SKIP, *(f'--deselect={test}' for test in HANG_PRONE), '-n', str(args.workers), '-p', 'no:cacheprovider', '-W', 'ignore', '--tb=line', '-q', '-rfE']
     print('running:', ' '.join(command), '\n  in', repo, '\n  log', log, flush=True)
     started = time.time()
+    code = 0
     with open(log, 'w', encoding='utf-8', errors='replace') as handle:
-        try:
-            result = subprocess.run(command, cwd=repo, env=clean_env(), stdout=handle, stderr=subprocess.STDOUT, timeout=args.timeout)
-            code = result.returncode
-        except subprocess.TimeoutExpired:
-            handle.write(f'\nRELEASE CHECK TIMED OUT after {args.timeout} s\n')
-            code = 124
+        process = subprocess.Popen(command, cwd=repo, env=clean_env(), stdout=handle, stderr=subprocess.STDOUT)
+        last_size, last_change = -1, time.time()
+        while process.poll() is None:
+            time.sleep(15)
+            size = log.stat().st_size
+            if size != last_size:
+                last_size, last_change = size, time.time()
+            reason = 'TIMED OUT after %d s' % args.timeout if time.time() - started > args.timeout else (
+                'STALLED: no output for %d s' % STALL_SECONDS if time.time() - last_change > STALL_SECONDS else '')
+            if reason:
+                subprocess.run(['taskkill', '/PID', str(process.pid), '/T', '/F'], capture_output=True)
+                handle.write(f'\nRELEASE CHECK {reason}\n')
+                handle.flush()
+                code = 124
+                break
+        else:
+            code = process.returncode
+        for test in HANG_PRONE:
+            try:
+                alone = subprocess.run([args.python, '-m', 'pytest', test, '-p', 'no:cacheprovider', '-W', 'ignore', '-q', '--tb=line'], cwd=repo, env=clean_env(),
+                                       capture_output=True, text=True, timeout=180)
+                handle.write(f'\nRUN ALONE {test}: ' + ('PASSED' if alone.returncode == 0 else 'FAILED') + '\n')
+                if alone.returncode != 0:
+                    handle.write(f'FAILED {test} - failed when run alone\n')
+            except subprocess.TimeoutExpired:
+                handle.write(f'\nRUN ALONE {test}: HUNG\nFAILED {test} - hung when run alone\n')
     print(f'finished in {(time.time() - started) / 60:.1f} min, pytest exit {code}')
     return compare(argparse.Namespace(log=str(log), python=args.python, repo=str(repo)))
 
@@ -79,7 +104,7 @@ def compare(args):
         problems.append(f'{len(unexplained)} failing test(s) that are not in the baseline' + (' and also fail when run alone' if args.python else ' (not re-run alone: pass --python)'))
     if passed < baseline['min_passed']:
         problems.append(f"only {passed} tests passed; at least {baseline['min_passed']} are expected")
-    if 'TIMED OUT' in text or not summary:
+    if 'RELEASE CHECK TIMED OUT' in text or 'RELEASE CHECK STALLED' in text or not summary:
         problems.append('the run did not finish')
     print('summary:', summary)
     print(f'failing {len(failing)} | in baseline {len(failing & known)} | new {len(new)} (pass alone: {len(explained)}) | baseline failures now passing {len(fixed)}')
