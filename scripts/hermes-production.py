@@ -115,18 +115,7 @@ def plan(args):
                 f"{status.get('state')}, route guard {status.get('route_guard')}, revision {str(status.get('revision'))[:8]}")
         free = shutil.disk_usage(Path(root).anchor or root).free
         row('OK' if free > 4 * GIB else 'BLOCK', 'disk for the install', f'{free / GIB:.1f} GB free on {Path(root).anchor} (about 1.3 GB needed)')
-        for item in cutover['approved_write_roots']:
-            info = component.inspect_root(item)
-            where = f"{info['kind'] or 'not a repository'}, branch {info['branch'] or '-'}, {info['filesystem']}"
-            row('BLOCK' if info['problem'] else 'TODO', 'write root (approved)', f"{item}: " + (f"REFUSED, {info['problem']}" if info['problem'] else f'valid, {where}; added at step 5'))
-            for note in info['notes']:
-                row('NOTE', '', note)
-        for name, entry in cutover['awaiting_decision'].items():
-            if entry['candidate']:
-                info = component.inspect_root(entry['candidate'])
-                row('WAIT', f'write root: {name}', f"candidate {entry['candidate']} ({info['kind'] or 'not a repository'}, branch {info['branch'] or '-'}, {info['filesystem']}); NOT added until you approve it")
-            else:
-                row('WAIT', f'write root: {name}', 'no repository found; tell me the path (it will be verified read-only first)')
+        row('OK', 'managed gateway write roots', 'none: you authorize project folders later; nothing is read or touched on any project')
         row('TODO', 'Claude/Codex logins', ', '.join(cutover['logins_at_cutover']) + ' allowed at step 5 (isolated until then); credentials stay where they are')
     else:
         row('BLOCK', 'managed Hermes component', 'no component root')
@@ -157,24 +146,24 @@ def plan(args):
                   port=cutover['gateway_port'], backups=cutover['backup_dir'], roots=' '.join(f'--add-root {r}' for r in cutover['approved_write_roots']),
                   logins=' '.join(f'--allow {n}' for n in cutover['logins_at_cutover']), lab_python=lab / 'ody-full-venv' / 'Scripts' / 'python.exe', lab_logs=lab / 'logs',
                   hermes_home=Path(os.environ.get('LOCALAPPDATA', '')) / 'hermes', component_root=root or '<component root>', launcher=launcher[0] if launcher else '<launcher pid>',
-                  old_port=cutover['old_webui_port'], target_example=cutover['approved_write_roots'][-1])
+                  old_port=cutover['old_webui_port'])
     print(PROCEDURE.format(**values))
     return 1 if blockers else 0
 
 
 PROCEDURE = r"""
 PROCEDURE after you say GO (re-run this plan first: every row OK; then one step at a time, each can be undone, stop after any of them)
-  1 BACKUP         {venv} {app}\scripts\odysseus-backup.py --backup-dir {backups} create
-                   {venv} {app}\scripts\odysseus-backup.py --backup-dir {backups} verify <snapshot name printed by create>
+  1 BACKUP         {venv} {app}\scripts\odysseus-backup.py --backup-dir {backups} --odysseus-root {prod} --data-dir {prod}\data create --exclude-secrets
+                   (no credential file is copied and secret values are removed from the copies; your existing full backups stay as they are. Rollback does not need the secrets: nothing in the live Hermes home or Odysseus is modified)
+                   {venv} {app}\scripts\odysseus-backup.py --backup-dir {backups} --odysseus-root {prod} --data-dir {prod}\data verify <snapshot name printed by create>
   2 RELEASE CHECK  {lab_python} {app}\scripts\hermes-release-check.py run --python {lab_python} --repo {app} --log {lab_logs}\release-check.log      (about 16 minutes, once)
                    must print "RELEASE CHECK: CLEAN"; after it, no commit may be added to {target}
   3 DEPENDENCY     {venv} -m pip install --no-index --no-cache-dir --find-links {wheels} websockets=={version}
                    undo: {venv} -m pip uninstall -y websockets
   4 GATEWAY        {venv} {app}\scripts\hermes-webapp-component.py ensure --origin managed --python {hpy} --home {home} --port {port}      (about 12 minutes; does not start it)
                    undo: delete {component_root}\managed\webapp and {home}
-  5 AUTHORIZE      {venv} {app}\scripts\hermes-webapp-component.py roots {roots}
-                   {venv} {app}\scripts\hermes-webapp-component.py logins {logins}
-                   undo: roots --clear-roots ; logins --deny claude --deny codex
+  5 AUTHORIZE      {venv} {app}\scripts\hermes-webapp-component.py logins {logins}      (write roots stay empty: Projects can read nothing it was not given and write nothing until you add a folder)
+                   undo: logins --deny claude --deny codex
   6 DATA           {venv} {app}\scripts\hermes-migrate.py bundle --source {hermes_home} --out {backups}\hermes-bundle-<yyyymmdd-hhmm> --python {hpy}
                    {venv} {app}\scripts\hermes-migrate.py plan --bundle <that folder>        must say "problems": []
                    {venv} {app}\scripts\hermes-migrate.py apply --bundle <that folder> --confirm-target {home}
@@ -185,8 +174,8 @@ PROCEDURE after you say GO (re-run this plan first: every row OK; then one step 
                    {venv} {app}\scripts\hermes-production.py env-on --approved
                    taskkill /PID {launcher} /T /F        then        Start-ScheduledTask -TaskName 'Odysseus AutoStart'
                    (needs: no active Odysseus chat or agent run; the old WebUI and the old gateway keep running)
-  8 VERIFY         read-only on your real projects: Personal works; Projects starts Hermes; a migrated conversation opens with its history; the file tree and diff of {target_example} load;
-                   logout ends Projects access. Editor save and commit were proven in the lab with this same code; try them only on a repository you choose.
+  8 VERIFY         no project is touched: Personal works; Projects starts Hermes; a migrated conversation opens with its history; the model picker, memory and skills show;
+                   logout ends Projects access. Editing a repository is tested when you add a folder.
 ROLLBACK, immediately: hermes-production.py env-off --approved, then the same restart. The old WebUI on {old_port} was never stopped or changed.
 """
 

@@ -1,28 +1,7 @@
 {
- "_comment": "Decisions for the production cutover. Only 'approved_write_roots' and 'logins_at_cutover' are ever applied. 'awaiting_decision' entries are shown by the plan and NEVER applied until you move them into the approved list.",
+ "_comment": "Decisions for the production cutover. Only 'approved_write_roots' and 'logins_at_cutover' are ever applied. Write roots stay EMPTY: you authorize individual project folders later, when you use them in Projects mode (hermes-webapp-component.py roots --add-root <folder>, which refuses anything but the exact top folder of one repository).",
  "version": 1,
- "approved_write_roots": [
-  "E:\\Project\\Sahib-Android",
-  "E:\\Project\\Mihakk"
- ],
- "awaiting_decision": {
-  "Sahib Desktop": {
-   "candidate": "C:\\Users\\Protagonist\\source\\repos\\adkar",
-   "evidence": [
-    "main checkout of the Sahib repository (remote origin Nobodyssssy/sahib), branch codex/windows-tauri, the Tauri desktop line",
-    "the Sahib-Android worktree is a linked worktree of it",
-    "already listed in your current HERMES_WRITE_SAFE_ROOT"
-   ],
-   "not_proof": "no recorded Hermes session names it as Sahib Desktop; confirm before it is approved"
-  },
-  "Masar": {
-   "candidate": null,
-   "evidence": [
-    "no repository by that name under E:\\Project or C:\\Users\\Protagonist\\source\\repos",
-    "no recorded session or WebUI project folder points at it"
-   ]
-  }
- },
+ "approved_write_roots": [],
  "logins_at_cutover": [
   "claude",
   "codex"

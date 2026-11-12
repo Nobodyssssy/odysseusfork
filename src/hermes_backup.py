@@ -8,6 +8,7 @@ is snapshotted first, and nothing that is not in the snapshot is ever deleted.
 from contextlib import closing
 from datetime import datetime, timezone
 import hashlib
+import fnmatch
 import json
 import os
 from pathlib import Path
@@ -31,9 +32,93 @@ _HERMES_EXCLUDED = ('hermes-agent', 'tools', 'installs', 'cache', 'lsp', 'logs')
 _MAX_STARTUP_FILE = 1024 * 1024
 MANIFEST_VERSION = 2
 
+# -- --exclude-secrets ------------------------------------------------------------------------------------
+# Applied to the COPY in the backup folder only; the live files are never modified. Not a promise that nothing sensitive remains: conversation text,
+# memories, notes and project data are copied as they are (see docs/hermes-backups-and-secrets.md).
+_SECRET_FILE_NAMES = {'auth.json', '.signing_key', '.app_key', '.pbkdf2_key', 'vault.key', 'vault.json.enc', 'session-token', '.sessions.json', 'sessions.json',
+                      '.credentials.json', 'id_rsa', 'id_ed25519'}
+_SECRET_FILE_PATTERNS = ('auth.json.*', '*.pem', '*.key', '*.p12', '*.pfx', 'credentials*.json', 'id_rsa.*', 'id_ed25519.*')
+_SECRET_ENV_NAME = re.compile(r'(KEY|TOKEN|SECRET|PASS|CREDENTIAL|COOKIE|PRIVATE|SALT|HASH|AUTH|SIGNING)', re.I)
+_SECRET_KEY = re.compile(r'(api_?key|passw(or)?d|passwd|secret|credential|private_?key|(access|refresh|oauth|webhook|auth|bearer|session|id|api)_?tokens?$|token_?hash|oauth_?tokens)', re.I)
+_JSON_SCRUB_LIMIT = 128 * 1024 * 1024        # larger JSON files are parsed in memory; the old WebUI's conversation files are tens of MB
+_YAML_INLINE = re.compile(r'^\s*[\w.\-]*(api_?key|token|secret|passw(or)?d|credential)[\w.\-]*\s*:\s*(?!["\']?(\$\{|\s*$|null\b|~|false\b|true\b|none\b))["\']?[^\s"\'#][^\n]{5,}', re.I | re.M)
+
 
 class RestoreBlocked(RuntimeError):
     """A restore was refused because something that uses the files is still running."""
+
+
+def _is_secret_file(name):
+    lowered = name.lower()
+    return lowered in _SECRET_FILE_NAMES or any(fnmatch.fnmatch(lowered, pattern) for pattern in _SECRET_FILE_PATTERNS)
+
+
+def _redact_env(target):
+    """Keep the lines whose variable name is not credential-like. Returns the names removed."""
+    kept, removed = [], []
+    for line in target.read_text(encoding='utf-8-sig', errors='replace').splitlines():
+        text = line.strip()
+        if text and not text.startswith('#') and '=' in text and _SECRET_ENV_NAME.search(text.split('=', 1)[0].replace('export', '').strip()):
+            removed.append(text.split('=', 1)[0].strip())
+            continue
+        kept.append(line)
+    target.write_text('\n'.join(kept) + '\n', encoding='utf-8', newline='\n')
+    return removed
+
+
+def _scrub_json(value, path='', removed=None):
+    removed = [] if removed is None else removed
+    if isinstance(value, dict):
+        for key, item in list(value.items()):
+            where = f'{path}.{key}' if path else str(key)
+            if isinstance(item, str) and item and _SECRET_KEY.search(str(key)):
+                value[key] = ''
+                removed.append(where)
+            else:
+                _scrub_json(item, where, removed)
+    elif isinstance(value, list):
+        for item in value:
+            _scrub_json(item, path + '[]', removed)
+    return removed
+
+
+class _TooLargeToScan(Exception):
+    pass
+
+
+def _redact_json_file(target):
+    if target.stat().st_size > _JSON_SCRUB_LIMIT:
+        raise _TooLargeToScan()
+    try:
+        data = json.loads(target.read_text(encoding='utf-8-sig'))
+    except ValueError:
+        return []
+    removed = _scrub_json(data)
+    if removed:
+        target.write_text(json.dumps(data, indent=1), encoding='utf-8')
+    return removed
+
+
+def _redact_sqlite(target):
+    """Blank secret-looking TEXT/BLOB columns in the backup copy, then VACUUM so the old values do not linger in free pages."""
+    scrubbed = []
+    with closing(sqlite3.connect(str(target))) as database:
+        database.execute('pragma secure_delete=ON')
+        for (table,) in database.execute("select name from sqlite_master where type='table' and name not like 'sqlite_%'").fetchall():
+            if '_fts' in table:
+                continue
+            for _cid, column, kind, *_rest in database.execute(f'pragma table_info("{table}")').fetchall():
+                if _SECRET_KEY.search(column) and not re.search(r'INT|REAL|NUM|FLOAT|DOUBLE|BOOL', (kind or '').upper()):
+                    changed = database.execute(f'update "{table}" set "{column}" = case when typeof("{column}")=\'blob\' then x\'\' else \'\' end '
+                                               f'where "{column}" is not null and "{column}" != \'\'').rowcount
+                    if changed:
+                        scrubbed.append(f'{table}.{column} ({changed})')
+        database.commit()
+        database.execute('pragma journal_mode=DELETE')
+        database.execute('vacuum')
+    for suffix in ('-wal', '-shm', '-journal'):
+        Path(str(target) + suffix).unlink(missing_ok=True)
+    return scrubbed
 
 
 def _digest(path):
@@ -133,7 +218,7 @@ def default_roots(environment=None):
 
 # ── Create ──────────────────────────────────────────────────────────────────────────────────
 def _build_backup(odysseus_root, hermes_home, backup_root, startup_files=(), task_xml=None, *, component_root=None,
-                  task_xmls=None, data_dir=None, environment=None, label='snapshot'):
+                  task_xmls=None, data_dir=None, environment=None, label='snapshot', exclude_secrets=False):
     ody = safe_directory(odysseus_root)
     hermes = safe_directory(hermes_home) if hermes_home else None
     component = safe_directory(component_root) if component_root else None
@@ -143,15 +228,39 @@ def _build_backup(odysseus_root, hermes_home, backup_root, startup_files=(), tas
         raise ValueError('Backups must be outside application source, data and Hermes state trees')
     stamp = datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')
     destination = private_directory(base / f'{label}-{stamp}-{uuid.uuid4().hex[:6]}')
-    entries, excluded = [], []
+    entries, excluded, redacted, secret_files, unscanned = [], [], [], [], []
 
     def copy(source, relative):
         if _is_reparse(source):
             raise ValueError('Backup encountered a reparse point; review it before proceeding')
+        if exclude_secrets and _is_secret_file(source.name):
+            secret_files.append(str(source))
+            return
         target = destination / relative
         method = _snapshot_file(source, target)
-        entries.append({'source': str(source), 'relative_path': relative.as_posix(),
-                        'bytes': target.stat().st_size, 'sha256': _digest(target), 'method': method})
+        entry = {'source': str(source), 'relative_path': relative.as_posix(), 'method': method}
+        if exclude_secrets:
+            removed, name = [], source.name.lower()
+            if name == '.env' or name.startswith('.env.'):
+                removed = _redact_env(target)
+            elif method == 'sqlite-online':
+                removed = _redact_sqlite(target)
+            elif name.endswith('.json'):
+                try:
+                    removed = _redact_json_file(target)
+                except _TooLargeToScan:         # cannot be checked for secrets, so it is not kept (usually a regenerable cache); the manifest says so
+                    target.unlink(missing_ok=True)
+                    unscanned.append(relative.as_posix())
+                    return
+            elif name.endswith(('.yaml', '.yml')):
+                if _YAML_INLINE.search(target.read_text(encoding='utf-8-sig', errors='replace')):
+                    target.unlink(missing_ok=True)
+                    raise ValueError(f'{source} holds an inline secret-like value; remove it or back up without --exclude-secrets. Nothing was declared complete.')
+            if removed:
+                entry['redacted'] = True
+                redacted.append({'path': relative.as_posix(), 'removed': removed})
+        entry.update({'bytes': target.stat().st_size, 'sha256': _digest(target)})
+        entries.append(entry)
 
     def tree(source, relative, root_exclusions=()):
         if not source.exists():
@@ -214,7 +323,12 @@ def _build_backup(odysseus_root, hermes_home, backup_root, startup_files=(), tas
         'tasks': tasks,
         'environment': {key: env[key] for key in _ENVIRONMENT_KEYS if env.get(key)},
         'consistency': 'Each SQLite database is transactionally consistent; static files are individually stabilized. Not an atomic cross-application snapshot.',
-        'scope': 'Odysseus data/config/startup plus Hermes user state, sessions, memories, skills, plugins and config, the Odysseus-Hermes component settings and the Windows startup tasks. Runtime installs, caches, logs and large model-weight formats are excluded. Hermes .env and API keys are included: keep the backup folder private.',
+        'scope': ('Odysseus data/config/startup plus Hermes user state, sessions, memories, skills, plugins and config, the Odysseus-Hermes component settings and the Windows startup tasks. Runtime installs, caches, logs and large model-weight formats are excluded. '
+                  + ('SECRETS EXCLUDED: credential files are not in this snapshot and secret-looking values were removed from the copies (see "secrets"). Conversation text and other content is copied as is.'
+                     if exclude_secrets else 'Hermes .env and API keys are included: keep the backup folder private.')),
+        **({'secrets': {'mode': 'excluded', 'files_not_copied': secret_files, 'values_removed': redacted, 'too_large_to_scan_not_copied': unscanned,
+                        'reauthentication': 'Hermes provider logins (auth.json) and API keys (.env), Odysseus .env secrets, web login sessions, signing/app keys, email passwords, search API keys'}}
+           if exclude_secrets else {}),
     })
     return destination, verify_backup(destination)
 
@@ -223,7 +337,7 @@ def create_backup(odysseus_root, hermes_home, backup_root, startup_files=(), tas
     return _build_backup(odysseus_root, hermes_home, backup_root, startup_files, task_xml, **options)[0]
 
 
-def create_full_backup(environment=None, roots=None):
+def create_full_backup(environment=None, roots=None, exclude_secrets=False):
     """Snapshot everything this installation depends on. Returns (snapshot folder, verification report)."""
     env = dict(os.environ if environment is None else environment)
     roots = roots or default_roots(env)
@@ -232,7 +346,7 @@ def create_full_backup(environment=None, roots=None):
     startup = roots.get('startup')
     files = [path for path in sorted(startup.iterdir()) if path.is_file() and path.stat().st_size <= _MAX_STARTUP_FILE] if startup and startup.is_dir() else []
     return _build_backup(roots['odysseus'], roots.get('hermes'), roots['backup_dir'], files, task_xmls=tasks,
-                         component_root=roots.get('component'), data_dir=roots.get('data'), environment=env)
+                         component_root=roots.get('component'), data_dir=roots.get('data'), environment=env, exclude_secrets=exclude_secrets)
 
 
 # ── Verify / list ───────────────────────────────────────────────────────────────────────────
@@ -278,7 +392,8 @@ def list_backups(backup_root, limit=20):
             entries = manifest['entries']
             result.append({'name': path.name, 'created_at': manifest.get('created_at'), 'files': len(entries),
                            'bytes': sum(item['bytes'] for item in entries), 'hermes': any(i['relative_path'].startswith('hermes/') for i in entries),
-                           'tasks': sorted(manifest.get('tasks', {})), 'kind': path.name.split('-')[0]})
+                           'tasks': sorted(manifest.get('tasks', {})), 'kind': path.name.split('-')[0],
+                           'secrets_excluded': (manifest.get('secrets') or {}).get('mode') == 'excluded'})
         except (OSError, ValueError, KeyError, TypeError):
             result.append({'name': path.name, 'created_at': None, 'files': 0, 'bytes': 0, 'hermes': False, 'tasks': [], 'kind': 'unreadable'})
         if len(result) >= limit:
@@ -303,7 +418,7 @@ def _within(root, relative):
     return candidate
 
 
-def plan_restore(snapshot, odysseus_root, hermes_home=None, component_root=None, startup_dir=None, data_dir=None):
+def plan_restore(snapshot, odysseus_root, hermes_home=None, component_root=None, startup_dir=None, data_dir=None, overwrite_redacted=False):
     """Verify the snapshot, then decide where every file would go. Changes nothing."""
     snapshot = safe_directory(snapshot)
     verify_backup(snapshot)
@@ -327,6 +442,8 @@ def plan_restore(snapshot, odysseus_root, hermes_home=None, component_root=None,
             continue
         target = _within(root, Path(*rest))
         status = 'new' if not target.exists() else ('same' if _digest(target) == item['sha256'] else 'overwrite')
+        if status == 'overwrite' and item.get('redacted') and not overwrite_redacted:
+            status = 'kept'           # the snapshot copy had its secrets removed: overwriting would erase the secrets in the live file
         items.append({'item': item, 'source': snapshot / relative, 'target': target, 'status': status, 'area': area})
     return {'snapshot': snapshot, 'manifest': manifest, 'items': items, 'skipped': skipped, 'roots': {'odysseus': ody, 'hermes': roots['hermes'], 'component': roots['component']}}
 
@@ -388,20 +505,22 @@ def _restore_file(entry):
 
 
 def restore_backup(snapshot, odysseus_root, hermes_home=None, component_root=None, startup_dir=None, *, data_dir=None,
-                   apply=False, safety_backup_root=None, busy=(), restore_tasks=False, task_importer=None, progress=None):
+                   apply=False, safety_backup_root=None, busy=(), restore_tasks=False, task_importer=None, progress=None, overwrite_redacted=False):
     """Restore a snapshot. Dry run unless ``apply``. Overwrites files present in the snapshot; deletes nothing.
 
     ``safety_backup_root`` receives a snapshot of the current state before anything is overwritten (pass ``False`` to
     skip it explicitly). ``busy`` lists running things; any entry blocks an applied restore.
     """
-    plan = plan_restore(snapshot, odysseus_root, hermes_home, component_root, startup_dir, data_dir)
+    plan = plan_restore(snapshot, odysseus_root, hermes_home, component_root, startup_dir, data_dir, overwrite_redacted)
     manifest, items = plan['manifest'], plan['items']
-    counts = {status: sum(1 for entry in items if entry['status'] == status) for status in ('new', 'same', 'overwrite')}
+    counts = {status: sum(1 for entry in items if entry['status'] == status) for status in ('new', 'same', 'overwrite', 'kept')}
     summary = {
         'snapshot': str(plan['snapshot']), 'created_at': manifest.get('created_at'), 'files': len(items),
         'bytes': sum(entry['item']['bytes'] for entry in items), **counts,
         'sqlite': sum(1 for entry in items if entry['item']['method'] == 'sqlite-online'),
         'overwrites': [str(entry['target']) for entry in items if entry['status'] == 'overwrite'][:25],
+        'kept_live_secrets': [str(entry['target']) for entry in items if entry['status'] == 'kept'][:50],
+        'secrets_excluded': (manifest.get('secrets') or {}).get('mode') == 'excluded',
         'skipped': plan['skipped'], 'tasks': sorted(manifest.get('tasks', {})), 'environment': manifest.get('environment', {}),
         'applied': False, 'restored': 0, 'failed': [], 'safety_backup': None, 'tasks_restored': [], 'tasks_failed': {},
     }
@@ -415,7 +534,7 @@ def restore_backup(snapshot, odysseus_root, hermes_home=None, component_root=Non
         summary['safety_backup'] = str(create_backup(plan['roots']['odysseus'], plan['roots']['hermes'], safety_backup_root,
                                                      component_root=plan['roots']['component'], data_dir=data_dir, label='prerestore'))
     for index, entry in enumerate(items):
-        if entry['status'] == 'same':
+        if entry['status'] in ('same', 'kept'):
             continue
         try:
             _restore_file(entry)
