@@ -28,6 +28,7 @@ from dataclasses import dataclass
 
 GRANT_COOKIE = 'odysseus_hermes_grant'
 ENTER_PATH = '/__odysseus/enter'
+ENTERED_COOKIE = 'odysseus_entered'       # a non-secret 30-second hint that this tab arrived from Odysseus (lets the Webapp's "Personal" link use history)
 TICKET_TTL = 30
 DEFAULT_GRANT_TTL = 8 * 3600
 MAX_GRANTS_PER_SESSION = 16

@@ -315,4 +315,22 @@ async function initialize() {
   }
 }
 
+// A page restored from the browser's back/forward cache was frozen, not re-validated: confirm the session is still good before it is used again
+// (a logout elsewhere must not leave a usable-looking page), and refresh the Hermes state line.
+window.addEventListener('pageshow', async event => {
+  if (!event.persisted) return;
+  sessionStorage.removeItem(snapshotKey);          // this IS the original page with its draft intact: nothing is waiting to be restored, and a leftover snapshot would block the next switch
+  try {
+    const response = await fetch(endpoint, { credentials: 'same-origin', cache: 'no-store', signal: AbortSignal.timeout(5000) });
+    if (response.status === 401 || response.status === 403 || response.redirected) { location.reload(); return; }
+    document.dispatchEvent(new Event('hermes-state-changed'));
+    const selector = document.getElementById('application-mode-selector');
+    if (selector) { selector.value = 'odysseus'; selector.disabled = false; }
+    const note = document.getElementById('application-mode-status');
+    if (note) note.textContent = '';
+  } catch (_) {
+    location.reload();
+  }
+});
+
 initialize();

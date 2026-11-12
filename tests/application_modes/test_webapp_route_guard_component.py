@@ -4,6 +4,7 @@ import subprocess
 import tempfile
 import types
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from src.hermes_backup import create_backup, verify_backup
@@ -45,6 +46,42 @@ class RouteGuardComponentTests(unittest.TestCase):
             with self.assertRaises(Exception):
                 verify_checkout(repo, pin, patch)
             patch.unlink()
+
+
+class PluginUpgradeTests(unittest.TestCase):
+    def component(self, root):
+        manager = WebappComponent.__new__(WebappComponent)
+        manager.application_root = ROOT
+        return manager
+
+    def test_our_earlier_plugin_is_upgraded_and_a_foreign_one_never_overwritten(self):
+        from src.hermes_webapp_component import KNOWN_PREVIOUS_PLUGIN_SHA256, PLUGIN_NAME
+        shipped = (ROOT / 'integrations/hermes-mode/desktop-plugins' / PLUGIN_NAME / 'plugin.js').read_bytes()
+        self.assertTrue(KNOWN_PREVIOUS_PLUGIN_SHA256 and all(len(item) == 64 for item in KNOWN_PREVIOUS_PLUGIN_SHA256))
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            target = home / 'desktop-plugins' / PLUGIN_NAME / 'plugin.js'
+            manager = self.component(home)
+            manager.install_desktop_plugin(home)
+            self.assertEqual(target.read_bytes(), shipped)                                   # fresh install
+            target.write_text('// the user wrote this\n')
+            with self.assertRaises(Exception):
+                manager.install_desktop_plugin(home)                                         # unknown content: refused ...
+            self.assertEqual(target.read_text(), '// the user wrote this\n')                # ... and untouched
+            import hashlib
+            fake_old = b'// pretend earlier shipped copy\n'
+            target.write_bytes(fake_old)
+            with mock.patch('src.hermes_webapp_component.KNOWN_PREVIOUS_PLUGIN_SHA256', (hashlib.sha256(fake_old).hexdigest(),)):
+                manager.install_desktop_plugin(home)
+            self.assertEqual(target.read_bytes(), shipped)                                   # a recognised earlier copy of ours is upgraded
+
+    def test_the_plugin_uses_history_only_with_the_arrival_hint_and_always_has_a_fallback(self):
+        text = (ROOT / 'integrations/hermes-mode/desktop-plugins/odysseus-return/plugin.js').read_text(encoding='utf-8')
+        for needle in ('odysseus_entered', 'window.history.go(-steps)', 'window.location.assign(href)', "hostname !== 'hermes.localhost'", 'pagehide'):
+            self.assertIn(needle, text)
+        self.assertNotIn('document.referrer', text)
+        self.assertIn("headers.get('x-odysseus-grant') === 'required'", text)                              # a revoked grant sends the tab to Odysseus
+        self.assertIn('new URL(response.url).origin === window.location.origin', text)                    # and only this page's own origin is watched
 
 
 class BackupScopeTests(unittest.TestCase):

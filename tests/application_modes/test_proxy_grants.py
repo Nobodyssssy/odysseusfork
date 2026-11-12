@@ -24,7 +24,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(Path(__file__).parent))
 
 from src import hermes_grants as hg
-from src.hermes_grants import ENTER_PATH, GRANT_COOKIE, Grant, GrantDenied, GrantStore, GrantStoreError, digest, valid_target
+from src.hermes_grants import ENTER_PATH, ENTERED_COOKIE, GRANT_COOKIE, Grant, GrantDenied, GrantStore, GrantStoreError, digest, valid_target
 from src.hermes_proxy import HermesHostProxy, ProxyPolicy
 
 try:
@@ -530,6 +530,18 @@ class GateTests(GateBase):
         self.assertTrue(cookie.startswith(GRANT_COOKIE + '='))
         self.assertEqual((headers['cache-control'], headers['referrer-policy']), ('no-store', 'no-referrer'))
         self.assertNotIn(ticket, json.dumps(headers))                                                   # the ticket is not echoed
+        conn = http.client.HTTPConnection('127.0.0.1', self.port, timeout=10)                         # a dict keeps one Set-Cookie; read them all
+        conn.putrequest('GET', ENTER_PATH + '?ticket=' + self.store.create_ticket(token, 'alice', TARGET), skip_host=True)
+        for name, value in (('Host', self.host), ('Sec-Fetch-Mode', 'navigate'), ('Sec-Fetch-Dest', 'document'), ('Referer', f'http://localhost:{self.port}/')):
+            conn.putheader(name, value)
+        conn.endheaders()
+        cookies = [value for name, value in conn.getresponse().getheaders() if name.lower() == 'set-cookie']
+        conn.close()
+        hint = [c for c in cookies if c.startswith(ENTERED_COOKIE + '=')]
+        self.assertEqual(len(hint), 1)
+        self.assertNotIn('HttpOnly', hint[0])                                                            # the Webapp plugin must be able to read (and clear) it
+        self.assertRegex(hint[0], r'Max-Age=30\b')
+        self.assertNotIn(GRANT_COOKIE, hint[0])                                                         # and it carries no credential
         self.assertEqual(self.gateway.seen(), [])                                                       # the exchange never reaches Hermes
 
     def test_a_granted_request_reaches_the_gateway_without_the_grant_cookie_and_keeps_the_gateways_own_auth(self):
@@ -648,7 +660,7 @@ class GateTests(GateBase):
         ticket = self.store.create_ticket(token, 'alice', TARGET)
         status, headers, _ = self.enter(ticket, cookie=secret)
         self.assertEqual(status, 303)
-        self.assertNotIn('set-cookie', headers)                                                         # Personal -> Projects -> Personal -> Projects keeps one grant
+        self.assertTrue(headers['set-cookie'].startswith(ENTERED_COOKIE + '='))                         # only the hint: Personal -> Projects -> Personal -> Projects keeps one grant
         self.assertEqual(self.call(secret)[0], 200)
 
     def test_grants_for_different_sessions_are_independent(self):

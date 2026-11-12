@@ -42,7 +42,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from src.hermes_grants import ENTER_PATH, GRANT_COOKIE, GrantError
+from src.hermes_grants import ENTER_PATH, ENTERED_COOKIE, GRANT_COOKIE, GrantError
 
 PROXY_HOST = 'hermes.localhost'
 MODES = ('webui', 'gateway')
@@ -302,7 +302,7 @@ class HermesHostProxy:
         out = []
         for name, value in headers:
             if name == b'cookie':
-                kept = [part.strip() for part in value.decode('latin-1').split(';') if part.strip().partition('=')[0] != GRANT_COOKIE]
+                kept = [part.strip() for part in value.decode('latin-1').split(';') if part.strip().partition('=')[0] not in (GRANT_COOKIE, ENTERED_COOKIE)]
                 if not kept:
                     continue
                 value = '; '.join(kept).encode('latin-1')
@@ -372,6 +372,7 @@ class HermesHostProxy:
             return await self._fail(send, *deny)
         out = [(b'location', target.encode('latin-1')), (b'cache-control', b'no-store'), (b'pragma', b'no-cache'), (b'referrer-policy', b'no-referrer'),
                (b'x-content-type-options', b'nosniff'), (b'content-length', b'0')]
+        out.append((b'set-cookie', f'{ENTERED_COOKIE}=1; Path=/; SameSite=Lax; Max-Age=30'.encode('latin-1')))      # a hint, not a credential; the grant cookie follows it
         if secret:
             out.append((b'set-cookie', f'{GRANT_COOKIE}={secret}; Path=/; HttpOnly; SameSite=Lax; Max-Age={max_age}'.encode('latin-1')))
         await send({'type': 'http.response.start', 'status': 303, 'headers': out})

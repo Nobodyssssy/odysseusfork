@@ -34,6 +34,7 @@ from src.hermes_component import (ComponentError, SourcePin, atomic_bytes, atomi
 
 ORIGINS = ('managed', 'adopted')
 PLUGIN_NAME = 'odysseus-return'
+KNOWN_PREVIOUS_PLUGIN_SHA256 = ('f72f51dabc67c4c99f40aca182ac66546220c678e5341020c95c3e73536d1760',)       # earlier shipped copies of OUR plugin: safe to upgrade; anything else is the user's and is never overwritten
 BUILD_SCRIPT = 'apps/desktop/scripts/build-webapp.mjs'
 BUNDLE_RELATIVE = 'apps/desktop/dist-webapp'
 ROUTE_GUARD_PATCH = 'integrations/hermes-mode/patches/webapp-route-guard.patch'
@@ -510,14 +511,14 @@ class WebappComponent:
         if not source.is_file():
             raise ComponentError('The packaged desktop plugin is missing.')
         target = Path(home) / 'desktop-plugins' / PLUGIN_NAME / 'plugin.js'
-        if target.exists() and target.read_bytes() != source.read_bytes():
+        if target.exists() and target.read_bytes() != source.read_bytes() and hashlib.sha256(target.read_bytes()).hexdigest() not in KNOWN_PREVIOUS_PLUGIN_SHA256:
             raise ComponentError('A different desktop plugin with this name already exists; it was not overwritten.')
         return source, target
 
     def install_desktop_plugin(self, home):
         """Copy the Odysseus return plugin into a managed home's desktop-plugins folder; a different existing plugin is never overwritten."""
         source, target = self.check_desktop_plugin(home)
-        if not target.exists():
+        if not target.exists() or target.read_bytes() != source.read_bytes():
             atomic_bytes(target, source.read_bytes())
         return PLUGIN_NAME
 

@@ -1,0 +1,35 @@
+{
+ "same_tab_return": {
+  "projects_history_entries": 2,
+  "took_s": 0.07,
+  "personal_js_marker_survived": true,
+  "draft_survived": true,
+  "draft_snapshot_cleared": true,
+  "status_message_cleared": true
+ },
+ "second_switch_after_a_cached_return": {
+  "worked": true,
+  "took_s": 3.0,
+  "note": "a leftover draft snapshot blocked this before the fix (found live)"
+ },
+ "new_tab_return": {
+  "took_s": 0.06,
+  "returned_in_same_tab": true
+ },
+ "no_previous_entry_fallback": {
+  "took_s": 1.58,
+  "timeout_now_900ms_not_remeasured": true,
+  "authenticated_after": true
+ },
+ "logout_while_in_projects": {
+  "result": "the Projects tab navigated to the Odysseus login by itself (plugin watches for 401 + X-Odysseus-Grant: required)"
+ },
+ "logout_then_cached_personal": {
+  "restored_in_s": 0.08,
+  "replaced_by_login_in_s": 0.42,
+  "stale_content_visible_s": 0.35,
+  "usable_after": false
+ },
+ "direct_open_of_projects_in_a_fresh_tab": "shows the Webapp sign-in (its token is per tab, by design); not a navigation case",
+ "chrome_only": "measured in the harness Chromium; other browsers unverified (the plugin falls back to a normal navigation without the Navigation API)"
+}
