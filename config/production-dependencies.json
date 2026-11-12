@@ -1,0 +1,12 @@
+{
+ "_comment": "Dependencies the production Odysseus venv needs for the Projects (official Hermes Webapp) backend. Installed offline from the staged, hash-checked wheel; nothing is fetched at install time.",
+ "python": "3.12 (cp312) win_amd64, the production venv's interpreter",
+ "websockets": {
+  "version": "17.4",
+  "wheel": "websockets-17.4-cp312-cp312-win_amd64.whl",
+  "sha256": "dde9cd67f18803949ebf96de8aba12b8ec5ee3115e34c75a2db85a3b0a6c20d5",
+  "staged_in": "F:\\Odysseus-Backups\\wheels\\websockets-17.4",
+  "why": "uvicorn ws=auto finds no WebSocket library without it, so the Hermes proxy would answer every WebSocket upgrade with an error",
+  "tested_with": "websockets 17.4, uvicorn 0.54.0, Python 3.12.10 (lab venv identical to production); proxy tests pass under websockets and websockets-sansio"
+ }
+}

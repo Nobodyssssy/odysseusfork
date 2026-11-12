@@ -34,12 +34,19 @@ from src.hermes_component import (ComponentError, SourcePin, atomic_bytes, atomi
 
 ORIGINS = ('managed', 'adopted')
 PLUGIN_NAME = 'odysseus-return'
-KNOWN_PREVIOUS_PLUGIN_SHA256 = ('f72f51dabc67c4c99f40aca182ac66546220c678e5341020c95c3e73536d1760',)       # earlier shipped copies of OUR plugin: safe to upgrade; anything else is the user's and is never overwritten
+KNOWN_PREVIOUS_PLUGIN_SHA256 = ('f72f51dabc67c4c99f40aca182ac66546220c678e5341020c95c3e73536d1760',
+                                'd87945810fe157502ff0dc498e03d59dea737f469a7f571716a7955bfff1b0a5')       # earlier shipped copies of OUR plugin: safe to upgrade; anything else is the user's and is never overwritten
 BUILD_SCRIPT = 'apps/desktop/scripts/build-webapp.mjs'
 BUNDLE_RELATIVE = 'apps/desktop/dist-webapp'
 ROUTE_GUARD_PATCH = 'integrations/hermes-mode/patches/webapp-route-guard.patch'
+PRESERVED_SETTINGS = ('write_roots', 'logins')
 _NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
 _RELEASE = re.compile(r'[0-9a-f]{12}')
+
+# Logins the user's own tools keep OUTSIDE the Hermes home. The gateway runs as the user, so unless these point somewhere else it finds and may use
+# them. 'isolated' (the default) points each at an empty folder; 'allowed' leaves them alone, which is a deliberate choice recorded in the config.
+LOGIN_TOOLS = {'claude': 'CLAUDE_CONFIG_DIR', 'codex': 'CODEX_HOME'}
+FAILED_RELEASES_KEPT = 2
 _SECRET_NAME = re.compile(r'KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL', re.I)
 # What the gateway process is given. Odysseus' own environment (provider keys, session secrets) is NOT passed on: the agent's shell inherits this.
 _GATEWAY_ENV = ('SystemRoot', 'SYSTEMROOT', 'SystemDrive', 'windir', 'ComSpec', 'PATHEXT', 'PATH', 'OS', 'USERNAME', 'USERDOMAIN', 'COMPUTERNAME',
@@ -97,6 +104,19 @@ def read_webapp_config(path):
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────────────────
+def _remove_release_tree(path, base):
+    """Delete one release folder, and only a real folder directly inside ``base`` (git leaves read-only files that Windows will not delete)."""
+    path, base = Path(path), Path(base)
+    if path.is_symlink() or os.path.realpath(path.parent) != os.path.realpath(base) or not _RELEASE.fullmatch(path.name):
+        raise ComponentError('Refusing to delete a folder that is not a release.')
+
+    def writable(function, target, _error):
+        os.chmod(target, 0o700)
+        function(target)
+
+    shutil.rmtree(path, onexc=writable) if sys.version_info >= (3, 12) else shutil.rmtree(path, onerror=writable)
+
+
 @contextmanager
 def read_only_git():
     """`git status` normally refreshes the index; against a checkout we only inspect, that is still a write."""
@@ -271,6 +291,7 @@ class WebappComponent:
         self.environment = dict(os.environ if environment is None else environment)
         self.directory = self.root / 'managed' / 'webapp'
         self.config_path = self.directory / 'component.json'
+        self.last_actions = []                                  # what the last ensure/repair did besides returning the config
 
     # -- reading ---------------------------------------------------------------------------
     def config(self):
@@ -365,28 +386,108 @@ class WebappComponent:
 
     # -- ensure ---------------------------------------------------------------------------
     def ensure(self, origin='managed', *, agent=None, home=None, python=None, port=None, public_url='', repo_roots=None, build=True,
-               repair=False, enable=False):
+               repair=False, enable=False, rebuild=False):
+        """Install, or bring an existing install back to health.
+
+        ensure   first install; on an existing install it verifies and heals the cheap parts (gateway home and config, return plugin,
+                 leftover releases). It never rebuilds.
+        repair   the same, and also moves the gateway to another home or port when asked. It rebuilds ONLY if the release no longer
+                 verifies, or with rebuild=True (about 12 minutes).
+        """
         if origin not in ORIGINS:
             raise ComponentError('origin must be managed or adopted.')
         pin = load_webapp_pin(self.application_root)
+        self.last_actions = []
         with component_lock(self.directory):
             config = self.config()
             if config and config['origin'] != origin:
                 raise ComponentError(f'The Webapp component is {config["origin"]}; Odysseus will not switch its ownership.')
             if config and not config['enabled'] and not enable:
                 return config
-            if config and not repair:
-                self.validate(config)
+            if config and not (repair and rebuild):
+                if repair:
+                    try:
+                        self.validate(config)
+                    except ComponentError as exc:
+                        self.last_actions.append(f'the release no longer verifies, rebuilding: {exc}')
+                        config = self._rebuild(pin, origin, config, agent, home, python, port, public_url, repo_roots, build)
+                        return config
+                else:
+                    self.validate(config)
                 if enable and not config['enabled']:
                     config = {**config, 'enabled': True}
                     atomic_json(self.config_path, config)
+                if config['origin'] == 'managed':
+                    config = self._heal(config, home=home, port=port, public_url=public_url, allow_move=repair)
+                if repair:
+                    self.last_actions.append('release verified; nothing was rebuilt')
                 return config
-            if origin == 'adopted':
-                candidate = self._ensure_adopted(pin, config, agent, home, python, port, build)
-            else:
-                candidate = self._ensure_managed(pin, config, home, python, port, public_url, repo_roots)
-            atomic_json(self.config_path, candidate)
-            return candidate
+            return self._rebuild(pin, origin, config, agent, home, python, port, public_url, repo_roots, build)
+
+    def _rebuild(self, pin, origin, config, agent, home, python, port, public_url, repo_roots, build):
+        if origin == 'adopted':
+            candidate = self._ensure_adopted(pin, config, agent, home, python, port, build)
+        else:
+            candidate = self._ensure_managed(pin, config, home, python, port, public_url, repo_roots)
+        for key in PRESERVED_SETTINGS:                              # settings the user chose must survive a new release
+            if config and key in config and key not in candidate:
+                candidate[key] = config[key]
+        atomic_json(self.config_path, candidate)
+        self._sweep_releases(candidate)
+        return candidate
+
+    def _heal(self, config, *, home=None, port=None, public_url=None, allow_move=False):
+        """Managed only, never builds. Recreates a missing gateway home or its config, applies a requested move to another home or port,
+        makes sure the return plugin is current, and removes releases that are not part of this component's history."""
+        current_port = loopback_port(config['url'])
+        new_port = int(port) if port else current_port
+        same = lambda a, b: os.path.normcase(os.path.realpath(a)) == os.path.normcase(os.path.realpath(b))
+        moved = bool(home) and not same(home, config['home'])
+        if public_url and public_url != config.get('public_url', ''):
+            raise ComponentError('Changing webapp.public_url needs a rebuild: run repair --rebuild with --public-url.')
+        if (moved or new_port != current_port) and not allow_move:             # ensure is idempotent: its arguments only matter for a first install
+            self.last_actions.append(f'ignored the given home or port (the saved ones are {config["home"]} and {current_port}); use repair to move them')
+            moved, new_port = False, current_port
+        home_path = private_directory(Path(home) if moved else Path(config['home']))
+        existed = (home_path / 'config.yaml').is_file()
+        if not existed or moved or new_port != current_port:
+            self.check_desktop_plugin(home_path)
+            self._prepare_home(config['python'], home_path, new_port, config.get('public_url', ''), [], self.config_schema_version(Path(config['agent'])))
+            self.last_actions.append('gateway home recreated' if not existed else 'gateway home settings updated')
+        self.install_desktop_plugin(home_path)
+        updated = dict(config)
+        if moved:
+            updated['home'] = str(home_path)
+        if new_port != current_port:
+            updated['url'] = f'http://127.0.0.1:{new_port}/'
+        if updated != config:
+            atomic_json(self.config_path, updated)
+        self._sweep_releases(updated)
+        return updated
+
+    def _sweep_releases(self, config):
+        """Under the component lock, so no build is running: remove releases that were never finished (a killed build) or are no longer the
+        current or previous one, and keep only the newest few failed ones for their logs."""
+        base = self.directory / 'releases'
+        if not base.is_dir():
+            return
+        keep = {config.get('release'), config.get('previous')}
+        failed = []
+        for entry in sorted(base.iterdir()):
+            if not entry.is_dir() or entry.is_symlink() or not _RELEASE.fullmatch(entry.name) or entry.name in keep:
+                continue
+            try:
+                state = json.loads((entry / 'release.json').read_text(encoding='utf-8')).get('state')
+            except (OSError, ValueError):
+                state = 'unknown'
+            if state == 'failed':
+                failed.append(entry)
+                continue
+            _remove_release_tree(entry, base)
+            self.last_actions.append(f'removed release {entry.name} ({state})')
+        for entry in sorted(failed, key=lambda item: item.stat().st_mtime)[:-FAILED_RELEASES_KEPT]:
+            _remove_release_tree(entry, base)
+            self.last_actions.append(f'removed old failed release {entry.name}')
 
     def _tools(self, source):
         majors = engine_majors(source)
@@ -554,6 +655,8 @@ class WebappComponent:
         result = {'enabled': config['enabled'], 'origin': config['origin'], 'url': config['url'], 'release': config.get('release'),
                   'previous': config.get('previous'), 'revision': (config.get('revisions') or {}).get('webapp')}
         result['route_guard'] = self.route_guard_state(config)
+        result['write_roots'] = config.get('write_roots')            # None: inherited from the operator's HERMES_WRITE_SAFE_ROOT
+        result['logins'] = self.logins()
         if not config['enabled']:
             return {**result, 'state': 'disabled'}
         port = loopback_port(config['url'])
@@ -686,6 +789,72 @@ class WebappComponent:
         atomic_json(target, {'version': 1, 'blocked': [{'path': item} for item in keep]})
         return keep
 
+    # -- settings kept in the component config (managed only) -------------------------------------
+    def logins(self):
+        config = self.config() or {}
+        allowed = set(config.get('logins') or [])
+        return {tool: 'allowed' if tool in allowed else 'isolated' for tool in LOGIN_TOOLS}
+
+    def set_logins(self, allow=(), deny=()):
+        """Deliberately let the gateway use (or stop it using) the Claude / Codex logins the user keeps outside the Hermes home."""
+        unknown = [tool for tool in (*allow, *deny) if tool not in LOGIN_TOOLS]
+        if unknown:
+            raise ComponentError('Unknown login(s): ' + ', '.join(unknown) + '. Known: ' + ', '.join(LOGIN_TOOLS) + '.')
+        with component_lock(self.directory):
+            config = self._require_managed()
+            current = (set(config.get('logins') or []) | set(allow)) - set(deny)
+            atomic_json(self.config_path, {**config, 'logins': sorted(current)})
+        return self.logins()
+
+    def write_roots(self):
+        return list((self.config() or {}).get('write_roots') or [])
+
+    def root_problem(self, path, config):
+        """Why ``path`` may not be a write root of the gateway, or None."""
+        candidate = Path(path)
+        if not candidate.is_absolute() or not candidate.is_dir():
+            return 'must be an existing folder with an absolute path'
+        real = Path(os.path.realpath(candidate))
+        if real.parent == real:
+            return 'is a drive root'
+        norm = lambda item: os.path.normcase(os.path.realpath(item))
+        inside = lambda child, parent: norm(child) == norm(parent) or norm(child).startswith(norm(parent) + os.sep)
+        profile = norm(Path.home())
+        if norm(real) == profile or profile.startswith(norm(real) + os.sep):
+            return 'is your whole user profile folder or a parent of it; name the project folders instead'
+        forbidden = [self.root, config['home']]
+        for variable in ('SystemRoot', 'ProgramFiles', 'ProgramFiles(x86)', 'ProgramData'):
+            if self.environment.get(variable):
+                forbidden.append(self.environment[variable])
+        if self.environment.get('LOCALAPPDATA'):
+            forbidden.append(Path(self.environment['LOCALAPPDATA']) / 'hermes')
+        for item in forbidden:
+            if inside(real, item):
+                return f'is inside {item}, which the gateway must not be able to rewrite'
+            if inside(item, real):
+                return f'contains {item}, which the gateway must not be able to rewrite'
+        return None
+
+    def set_write_roots(self, add=(), remove=(), clear=False):
+        """The folders the managed gateway may write to (its HERMES_WRITE_SAFE_ROOT). Narrower than, and independent of, the operator's own variable."""
+        with component_lock(self.directory):
+            config = self._require_managed()
+            roots = [] if clear else list(config.get('write_roots') or [])
+            drop = {os.path.normcase(os.path.normpath(item)) for item in remove}
+            roots = [item for item in roots if os.path.normcase(os.path.normpath(item)) not in drop]
+            for item in add:
+                problem = self.root_problem(item, config)
+                if problem:
+                    raise ComponentError(f'{item} {problem}.')
+                clean = os.path.normpath(str(item))
+                if os.path.normcase(clean) not in {os.path.normcase(existing) for existing in roots}:
+                    roots.append(clean)
+            updated = {key: value for key, value in config.items() if key != 'write_roots'}
+            if roots:
+                updated['write_roots'] = roots
+            atomic_json(self.config_path, updated)
+        return roots
+
     def route_guard_patch(self):
         path = (self.application_root / ROUTE_GUARD_PATCH).resolve()
         if not path.is_file():
@@ -703,8 +872,16 @@ class WebappComponent:
 
     def gateway_environment(self, config):
         env = {key: self.environment[key] for key in _GATEWAY_ENV if key in self.environment}
-        if 'HERMES_WRITE_SAFE_ROOT' in self.environment:      # the operator's own write policy, passed through unchanged, never invented
+        if config.get('write_roots'):                          # this gateway's own, narrower list; the operator's variable (used by the old WebUI) is left alone
+            env['HERMES_WRITE_SAFE_ROOT'] = os.pathsep.join(config['write_roots'])
+        elif 'HERMES_WRITE_SAFE_ROOT' in self.environment:    # otherwise the operator's own write policy, passed through unchanged, never invented
             env['HERMES_WRITE_SAFE_ROOT'] = self.environment['HERMES_WRITE_SAFE_ROOT']
+        allowed = set(config.get('logins') or [])
+        for tool, variable in LOGIN_TOOLS.items():
+            if tool not in allowed:
+                env[variable] = str(private_directory(self.directory / 'isolated-logins' / tool))
+            elif variable in self.environment:                # allowed: the user's own custom location, if they use one
+                env[variable] = self.environment[variable]
         if 'HERMES_WEBAPP_ALLOW_GIT_PUBLISH' in self.environment:       # the operator's explicit opt-in for push / pull request, never invented
             env['HERMES_WEBAPP_ALLOW_GIT_PUBLISH'] = self.environment['HERMES_WEBAPP_ALLOW_GIT_PUBLISH']
         env.update({'HERMES_HOME': config['home'], 'PYTHONPATH': config['agent'], 'HERMES_WEBAPP_DIST': config['bundle'],
@@ -715,6 +892,8 @@ class WebappComponent:
         config = self._require_managed()
         with component_lock(self.directory / 'service'):
             self.validate(config)
+            if not (Path(config['home']) / 'config.yaml').is_file():
+                raise ComponentError('The gateway home is missing or incomplete; run repair (it does not rebuild).')
             state = self.status()['state']
             if state == 'ready':
                 return self.status()

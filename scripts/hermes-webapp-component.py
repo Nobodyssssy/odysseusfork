@@ -19,9 +19,15 @@ from src.runtime_paths import get_hermes_component_root
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=('plan', 'ensure', 'repair', 'status', 'start', 'stop', 'restart', 'rollback', 'disable', 'enable', 'blocked'))
+    parser.add_argument('action', choices=('plan', 'ensure', 'repair', 'status', 'start', 'stop', 'restart', 'rollback', 'disable', 'enable', 'blocked', 'roots', 'logins'))
     parser.add_argument('--block', action='append', default=[], help='blocked: add a folder the gateway must never read, write or delete')
     parser.add_argument('--unblock', action='append', default=[], help='blocked: remove a folder from the list')
+    parser.add_argument('--add-root', action='append', default=[], help='roots: a folder the managed gateway may write to (its own HERMES_WRITE_SAFE_ROOT)')
+    parser.add_argument('--remove-root', action='append', default=[], help='roots: stop allowing a folder')
+    parser.add_argument('--clear-roots', action='store_true', help='roots: back to the operator HERMES_WRITE_SAFE_ROOT')
+    parser.add_argument('--allow', action='append', default=[], help='logins: claude or codex; let the gateway use that tool\'s own login (default: isolated)')
+    parser.add_argument('--deny', action='append', default=[], help='logins: claude or codex; isolate that login again')
+    parser.add_argument('--rebuild', action='store_true', help='ensure/repair: rebuild the release even if it verifies (about 12 minutes)')
     parser.add_argument('--root', type=Path)
     parser.add_argument('--origin', choices=('managed', 'adopted'), default='managed')
     parser.add_argument('--agent', type=Path, help='adopted: the existing Hermes agent checkout')
@@ -45,7 +51,9 @@ def main(argv=None):
             payload = component.status()
         elif args.action in ('ensure', 'repair', 'enable'):
             payload = component.ensure(args.origin, agent=args.agent, home=args.home, python=args.python, port=args.port, public_url=args.public_url,
-                                       repo_roots=args.repo_root, build=not args.no_build, repair=args.action == 'repair', enable=args.action == 'enable')
+                                       repo_roots=args.repo_root, build=not args.no_build, repair=args.action == 'repair', enable=args.action == 'enable',
+                                       rebuild=args.rebuild)
+            payload = {**payload, 'actions': component.last_actions}
         elif args.action == 'start':
             payload = component.start()
         elif args.action == 'stop':
@@ -60,6 +68,14 @@ def main(argv=None):
             for item in args.unblock:
                 component.remove_blocked_folder(item)
             payload = {'blocked': component.blocked_folders()}
+        elif args.action in ('roots', 'logins'):
+            if args.action == 'roots':
+                roots = component.set_write_roots(args.add_root, args.remove_root, args.clear_roots) if (args.add_root or args.remove_root or args.clear_roots) else component.write_roots()
+                payload = {'write_roots': roots or None, 'inherits_operator_variable': not roots}
+            else:
+                payload = {'logins': component.set_logins(args.allow, args.deny) if (args.allow or args.deny) else component.logins()}
+            if (args.add_root or args.remove_root or args.clear_roots or args.allow or args.deny) and component.status().get('state') == 'ready':
+                payload['restart_required'] = 'the running gateway keeps its old settings until it is restarted'
         else:
             component.disable()
             payload = {'enabled': False, 'state': 'disabled', 'processes_stopped': False}

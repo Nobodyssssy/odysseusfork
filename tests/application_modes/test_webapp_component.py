@@ -345,7 +345,7 @@ class ManagedTests(ComponentCase):
         broken = self.tmp / 'local/hermes/tools/node-26.12.1-win32-x64/node.cmd'
         broken.write_text('@echo off\r\nif "%1"=="--version" (echo v26.12.1& exit /b 0)\r\nexit /b 7\r\n', encoding='utf-8')
         with self.assertRaises(ComponentError):
-            self.component.ensure('managed', port=free_port(), python=self.python, repair=True)
+            self.component.ensure('managed', port=free_port(), python=self.python, repair=True, rebuild=True)
         self.assertEqual(read_webapp_config(self.component.config_path), first)
         self.assertTrue(inspect_bundle(first['bundle'])['ok'])
 
@@ -360,7 +360,7 @@ class ManagedTests(ComponentCase):
 
     def test_upgrade_is_side_by_side_and_rollback_restores_the_previous_release(self):
         first = self.managed()
-        second = self.component.ensure('managed', port=free_port(), python=self.python, repair=True)
+        second = self.component.ensure('managed', port=free_port(), python=self.python, repair=True, rebuild=True)
         self.assertNotEqual(second['release'], first['release'])
         self.assertEqual(second['previous'], first['release'])
         self.assertTrue(Path(first['bundle']).is_dir() and Path(second['bundle']).is_dir())          # both retained
@@ -374,7 +374,7 @@ class ManagedTests(ComponentCase):
     def test_rollback_refuses_without_a_complete_previous_release(self):
         with self.assertRaises(ComponentError):
             self.managed() and self.component.rollback()
-        second = self.component.ensure('managed', port=free_port(), python=self.python, repair=True)
+        second = self.component.ensure('managed', port=free_port(), python=self.python, repair=True, rebuild=True)
         release = self.component._release_dir(second['previous'])
         atomic_json(release / 'release.json', {'state': 'preparing'})
         with self.assertRaises(ComponentError):

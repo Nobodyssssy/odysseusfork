@@ -122,6 +122,14 @@ function watchForRevokedAccess() {
 noteArrival()
 watchForRevokedAccess()
 
+// Looks like the other status-bar chips (same height, type size and theme tokens) but is the one control that leaves Projects, so it is
+// tinted with the theme accent and outlined. Everything is inline and built from the theme's own variables: the Webapp's stylesheet only
+// contains the classes its own source uses, so new utility classes would silently do nothing. Hover and focus are handled on the element.
+const CHIP_BACKGROUND = 'color-mix(in srgb, var(--ui-accent) 14%, transparent)'
+const CHIP_BACKGROUND_HOVER = 'color-mix(in srgb, var(--ui-accent) 26%, transparent)'
+const CHIP_OUTLINE = 'inset 0 0 0 1px color-mix(in srgb, var(--ui-accent) 40%, transparent)'
+const CHIP_FOCUS = '0 0 0 2px color-mix(in srgb, var(--ui-accent) 75%, transparent)'
+
 function PersonalLink() {
   const href = personalUrl()
 
@@ -133,7 +141,32 @@ function PersonalLink() {
     href,
     title: 'Back to Odysseus Personal',
     'aria-label': 'Back to Odysseus Personal',
-    className: 'inline-flex h-full items-center gap-1 px-2 text-[0.6875rem] font-medium text-(--ui-text-secondary) hover:text-(--ui-text-primary)',
+    className: 'inline-flex items-center gap-1 text-[0.6875rem] transition-colors',
+    style: {
+      alignSelf: 'center',
+      height: '1rem',
+      margin: '0 0.375rem 0 0.125rem',
+      padding: '0 0.5rem',
+      borderRadius: '0.25rem',
+      fontWeight: 600,
+      color: 'var(--ui-text-primary)',
+      background: CHIP_BACKGROUND,
+      boxShadow: CHIP_OUTLINE,
+      textDecoration: 'none',
+      cursor: 'pointer'
+    },
+    onMouseEnter: event => {
+      event.currentTarget.style.background = CHIP_BACKGROUND_HOVER
+    },
+    onMouseLeave: event => {
+      event.currentTarget.style.background = CHIP_BACKGROUND
+    },
+    onFocus: event => {
+      event.currentTarget.style.boxShadow = `${CHIP_OUTLINE}, ${CHIP_FOCUS}`
+    },
+    onBlur: event => {
+      event.currentTarget.style.boxShadow = CHIP_OUTLINE
+    },
     onClick: event => {
       event.preventDefault()
       returnToPersonal(href)
