@@ -115,6 +115,7 @@ class ComponentCase(unittest.TestCase):
         plugin = self.app / 'integrations/hermes-mode/desktop-plugins/odysseus-return'
         plugin.mkdir(parents=True)
         shutil.copy(ROOT / 'integrations/hermes-mode/desktop-plugins/odysseus-return/plugin.js', plugin / 'plugin.js')
+        shutil.copytree(ROOT / 'integrations/hermes-mode/plugins/odysseus-workspace-grants', self.app / 'integrations/hermes-mode/plugins/odysseus-workspace-grants', ignore=shutil.ignore_patterns('__pycache__'))
         tools = self.tmp / 'local/hermes/tools'
         for name, version, body in (('node', '26.12.1', FAKE_NODE), ('pnpm', '12.15.0', FAKE_PNPM)):
             folder = tools / f'{name}-{version}-win32-x64'
@@ -527,6 +528,27 @@ class LifecycleTests(ComponentCase):
             self.component.stop()
         self.assertEqual(self.component.status()['state'], 'ready')
         self.assertEqual(self.component.stop(force=True)['state'], 'stopped')
+
+    def test_a_command_running_inside_the_gateway_can_never_stop_it_even_forced(self):
+        self.component.start(timeout=60)
+        pid = self.component.owned_listener(self.config)
+        for force in (False, True):
+            with mock.patch.object(WebappComponent, '_ancestor_pids', return_value=[4, pid]):
+                with self.assertRaisesRegex(ComponentError, 'inside the gateway'):
+                    self.component.stop(force=force)
+                with self.assertRaisesRegex(ComponentError, 'inside the gateway'):
+                    self.component.restart(force=force)
+        self.assertEqual(self.component.status()['state'], 'ready')
+
+    def test_drain_stops_only_when_the_gateways_own_store_shows_no_started_turn(self):
+        self.component.start(timeout=60)
+        with mock.patch.object(WebappComponent, '_running_admissions', return_value=2):
+            with self.assertRaises(controls.ActiveRuns):
+                self.component.stop(drain=1)
+        self.assertEqual(self.component.status()['state'], 'ready')
+        (Path(self.config['home']) / 'busy.flag').write_text('1')          # "touched recently" alone does not block a proven-idle drain
+        with mock.patch.object(WebappComponent, '_running_admissions', return_value=0):
+            self.assertEqual(self.component.stop(drain=1)['state'], 'stopped')
 
     def test_stop_never_kills_a_listener_it_did_not_provision(self):
         port = int(self.config['url'].split(':')[-1].strip('/'))

@@ -39,7 +39,8 @@ def main(argv=None):
     parser.add_argument('--public-url', default='', help='managed: webapp.public_url for the sign-in gate, e.g. http://hermes.localhost:7000')
     parser.add_argument('--repo-root', action='append', default=[], help='managed: a repository discovery root (default: discovery off)')
     parser.add_argument('--no-build', action='store_true', help='adopted: record the install without building a bundle')
-    parser.add_argument('--force', action='store_true', help='stop/restart even if sessions look active')
+    parser.add_argument('--force', action='store_true', help='stop/restart even if turns are running; asks you to confirm and only works in an interactive terminal')
+    parser.add_argument('--drain', type=int, default=0, metavar='SECONDS', help='stop/restart: wait up to this long for running turns to finish, then stop only if none are running')
     args = parser.parse_args(argv)
     environment = operator_environment()
     root = args.root or get_hermes_component_root(environment)
@@ -47,6 +48,12 @@ def main(argv=None):
         parser.error('An explicit --root is required outside Windows.')
     try:
         component = WebappComponent(root, application_root=APP_ROOT, environment=environment)
+        if args.force and args.action in ('stop', 'restart'):
+            # An operator decision, not a flag an agent can add to a scheduled task: it needs a real terminal and a typed answer.
+            if not (sys.stdin.isatty() and sys.stdout.isatty()):
+                parser.error('--force needs an interactive terminal; use --drain SECONDS from scripts and supervisors.')
+            if input('Turns running in the gateway will be lost with an unknown outcome. Type STOP to continue: ').strip() != 'STOP':
+                parser.error('Cancelled.')
         if args.action == 'plan':
             payload = component.plan(args.agent, args.home, args.python, None)
         elif args.action == 'status':
@@ -59,9 +66,9 @@ def main(argv=None):
         elif args.action == 'start':
             payload = component.start()
         elif args.action == 'stop':
-            payload = component.stop(force=args.force)
+            payload = component.stop(force=args.force, drain=args.drain)
         elif args.action == 'restart':
-            payload = component.restart(force=args.force)
+            payload = component.restart(force=args.force, drain=args.drain)
         elif args.action == 'rollback':
             payload = component.rollback()
         elif args.action == 'blocked':

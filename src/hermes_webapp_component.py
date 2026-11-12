@@ -1043,16 +1043,67 @@ class WebappComponent:
             raise controls.Unavailable('The listener is not the gateway Odysseus provisioned; nothing was stopped.')
         return pid
 
-    def stop(self, force=False):
+    def _running_admissions(self, config):
+        """Turns the gateway itself records as queued or started (read-only; None when its store is unreadable). Unlike the five-minute
+        session count this is the gateway's own durable truth, so an idle gateway can be drained to a provable zero."""
+        import sqlite3
+        db = Path(config['home']) / 'state.db'
+        if not db.is_file():
+            return 0
+        try:
+            conn = sqlite3.connect(f'file:{db.as_posix()}?mode=ro', uri=True, timeout=3)
+            try:
+                return conn.execute("SELECT COUNT(*) FROM session_admissions WHERE status='started'").fetchone()[0]
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            return None
+
+    @staticmethod
+    def _ancestor_pids(pid=None):
+        """Pids of the processes that started this one (nearest first), or None when the process tree cannot be read."""
+        pid = pid or os.getpid()
+        try:
+            import psutil
+            return [parent.pid for parent in psutil.Process(pid).parents()]
+        except Exception:                                    # noqa: BLE001 - psutil missing or the process vanished
+            pass
+        try:
+            from src import service_controls as controls
+            table, chain = controls.processes(), []
+            while pid in table and table[pid][0] not in chain and table[pid][0]:
+                pid = table[pid][0]
+                chain.append(pid)
+            return chain
+        except Exception:                                    # noqa: BLE001
+            return None
+
+    def stop(self, force=False, drain=0):
+        """Stop the gateway Odysseus provisioned, never one that is serving the caller.
+
+        Refused (even with force) when this process descends from the gateway: a turn that restarts its own gateway leaves the turn
+        with an unknown outcome. Otherwise refused while turns are running; `drain` waits up to that many seconds for them to finish.
+        The check does not read command lines, so renaming or wrapping the command changes nothing."""
         from src import service_controls as controls
         config = self._require_managed()
         with component_lock(self.directory / 'service'):
             if self.status()['state'] in ('stopped',):
                 return self.status()
-            sessions = self.active_sessions()
-            if (sessions is None or sessions > 0) and not force:
-                raise controls.ActiveRuns(sessions if sessions else 1, recent=True)
-            controls.kill_tree(self.owned_listener(config))
+            pid = self.owned_listener(config)
+            if pid in (self._ancestor_pids() or ()):
+                raise ComponentError('This command is running inside the gateway it would stop, so the turn that issued it would be lost with an unknown outcome. '
+                                     'Stop or restart the gateway from a separate PowerShell/terminal window instead.')
+            deadline = time.monotonic() + max(0, drain)
+            while True:
+                running = self._running_admissions(config)
+                count = 0 if (drain and running == 0) else (running or self.active_sessions())
+                if count == 0 or force or time.monotonic() >= deadline:
+                    break
+                time.sleep(1)
+            if count is None or count > 0:
+                if not force:
+                    raise controls.ActiveRuns(count if count else 1, recent=not running)
+            controls.kill_tree(pid)
             port = loopback_port(config['url'])
             deadline = time.monotonic() + 30
             while not _port_free(port) and time.monotonic() < deadline:
@@ -1061,8 +1112,8 @@ class WebappComponent:
                 raise ComponentError('The gateway did not release its port; check it manually.')
         return self.status()
 
-    def restart(self, force=False):
-        self.stop(force=force)
+    def restart(self, force=False, drain=0):
+        self.stop(force=force, drain=drain)
         return self.start()
 
 
