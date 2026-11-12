@@ -64,12 +64,20 @@ _SAFE_METHODS = {'GET', 'HEAD', 'OPTIONS'}
 # What a browser sees when the hand-over from Odysseus is refused. Every refusal returns this same page (no oracle for which check failed) and it recovers by
 # itself, in at most three steps within 30 seconds: reload once (a refusal before the ticket was read leaves it unspent, which is what a manual hard refresh
 # relies on), then go back to Odysseus once for a fresh ticket (the ticket was spent or expired), then stop and show the message. It changes no check.
+#
+# It also removes any service worker registered on this origin, and the cache it left, before it retries. A browser that used the old Hermes WebUI at
+# hermes.localhost keeps that app's worker (scope /) for good; the worker answers every navigation by re-fetching it as fetch(new Request(request)), which turns
+# the navigation (Sec-Fetch-Mode navigate, Dest document) into a plain fetch (same-origin, empty). The enter route refuses that, correctly, on every click
+# until a hard refresh (which bypasses workers). The official Webapp registers no worker of its own, so nothing legitimate is removed.
 _ENTER_SCRIPT = ("(function(){var K='odysseus.enterRetry',now=Date.now(),s={stage:0,t:0},d=document.body.dataset,"
                  "give=function(){document.getElementById('w').hidden=true;document.getElementById('m').hidden=false};"
                  "try{var r=JSON.parse(sessionStorage.getItem(K)||'null');if(r&&now-r.t<30000)s=r}catch(e){}"
                  "if(s.stage>=2)return give();"
                  "try{var v=JSON.stringify({stage:s.stage+1,t:s.stage?s.t:now});sessionStorage.setItem(K,v);if(sessionStorage.getItem(K)!==v)throw 0}catch(e){return give()}"
-                 "if(s.stage===0)location.reload();else location.replace(d.back+'?open=projects')})()")
+                 "var done=false,go=function(){if(done)return;done=true;if(s.stage===0)location.reload();else location.replace(d.back+'?open=projects')},jobs=[];"
+                 "try{if(navigator.serviceWorker)jobs.push(navigator.serviceWorker.getRegistrations().then(function(a){return Promise.all(a.map(function(x){return x.unregister()}))}))}catch(e){}"
+                 "try{if(window.caches)jobs.push(caches.keys().then(function(a){return Promise.all(a.filter(function(k){return k.indexOf('hermes-shell-')===0}).map(function(k){return caches.delete(k)}))}))}catch(e){}"
+                 "Promise.all(jobs).then(go,go);setTimeout(go,1500)})()")
 _ENTER_SCRIPT_HASH = base64.b64encode(hashlib.sha256(_ENTER_SCRIPT.encode()).digest()).decode()
 _ENTER_MESSAGE = 'Could not open Hermes from Odysseus. Return to Odysseus and choose Projects again.'
 

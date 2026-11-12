@@ -30,3 +30,20 @@ Tests: `tests/application_modes/test_proxy_grants.py::test_a_refused_hand_over_r
 ## Production check after deployment (no login available to the agent)
 
 Real Firefox 160 against `localhost:7000`, bogus tickets, redacted: a normal link click and a typed URL both produce the refusal page, which reloads once, goes back to Odysseus once and ends on the Odysseus login in about 0.2 s; the server log carries `reason=ticket-unknown-or-already-used` / `reason=referer seen=absent site=cross-site`; no ticket value appears anywhere in the log (checked with a byte-offset scan of the new log text). Authenticated Personal <-> Projects cycles on production were left to the user's browser. Note for anyone counting log lines in a script: use a byte offset, not `len(text.split("\n"))`.
+
+## Root cause (measured, 2026-11-12, after the first deployment)
+
+After the user clicked Projects five times and each click showed the refusal page, the production log named the refusal on every attempt:
+`enter refused before the ticket: reason=fetch-metadata mode=same-origin dest=empty` (15 lines, three per click: first request, reload, fresh ticket). A link navigation is `navigate/document`; `same-origin/empty` is a plain fetch.
+
+The user's Firefox profile (`serviceworker.txt`, scope strings only) still holds the **old Hermes WebUI's service worker**: `http://hermes.localhost:7000/` -> `sw.js?v=exp-v0.52.653-dirty-27d6d68d`. Its navigation handler is `fetch(new Request(event.request, {cache:'no-store'}))` (`F:\hermes-webui\static\sw.js`); building a Request from a navigation request turns mode `navigate` into `same-origin` and drops the destination. The proxy correctly refuses that on `/__odysseus/enter`. A hard refresh bypasses service workers, which is why only Ctrl+Shift+R worked, and why every earlier test (fresh or replica profiles with no hermes.localhost worker) passed. The official Webapp bundle registers no worker (searched `dist-webapp`).
+
+Reproduced in Firefox 160 with the real `sw.js` on a stand-in origin (`tests/desktop-lab/sw_standin.py`, `sw_driver.py`; the stand-in makes the same two decisions as the proxy and serves the real refusal page from `src/hermes_proxy.py`):
+
+| Case | Server sees on the enter request | Result |
+|---|---|---|
+| no worker | `navigate / document`, Referer = Odysseus | accepted |
+| old worker, previous page | `same-origin / empty`, Referer = `.../sw.js` (twice: click and reload) | refused, bounce, refused |
+| old worker, fixed page | refused once, then `navigate / document` | accepted after 0.1 s; no registration left |
+
+Fix: the refusal page unregisters every service worker on the origin and deletes the `hermes-shell-*` caches before it retries. One brief refusal flash on the first click after deployment, then no worker exists and clicks pass first time. No check was relaxed.

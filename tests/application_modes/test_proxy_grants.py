@@ -649,6 +649,8 @@ class GateTests(GateBase):
         self.assertIn("default-src 'none'", headers['content-security-policy'])
         self.assertIn(f'data-back="http://localhost:{self.port}/"', page)                                # always the Odysseus origin on this port
         self.assertNotIn(ticket, page)
+        for needle in ('getRegistrations', 'unregister', "'hermes-shell-'"):                                  # a stale worker from the old Hermes WebUI is removed before the retry
+            self.assertIn(needle, script)
         self.assertEqual(self.enter(ticket)[0], 303)                                                     # the unspent ticket still works, which is what the reload relies on
         spent = self.enter(ticket, referer='default')                                                    # now spent: the same page, so nothing reveals which check refused
         self.assertEqual((spent[0], spent[2]), (403, body))
