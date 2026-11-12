@@ -34,6 +34,8 @@ from src.hermes_component import (ComponentError, SourcePin, atomic_bytes, atomi
 
 ORIGINS = ('managed', 'adopted')
 PLUGIN_NAME = 'odysseus-return'
+WORKSPACE_GRANTS_PLUGIN = 'odysseus-workspace-grants'
+WORKSPACE_GRANTS_PLUGIN_SOURCE = 'integrations/hermes-mode/plugins/odysseus-workspace-grants'
 KNOWN_PREVIOUS_PLUGIN_SHA256 = ('f72f51dabc67c4c99f40aca182ac66546220c678e5341020c95c3e73536d1760',
                                 'd87945810fe157502ff0dc498e03d59dea737f469a7f571716a7955bfff1b0a5')       # earlier shipped copies of OUR plugin: safe to upgrade; anything else is the user's and is never overwritten
 BUILD_SCRIPT = 'apps/desktop/scripts/build-webapp.mjs'
@@ -459,6 +461,7 @@ class WebappComponent:
             self._prepare_home(config['python'], home_path, new_port, config.get('public_url', ''), [], self.config_schema_version(Path(config['agent'])))
             self.last_actions.append('gateway home recreated' if not existed else 'gateway home settings updated')
         self.install_desktop_plugin(home_path)
+        self.install_workspace_grants_plugin(home_path, config['python'])
         updated = dict(config)
         if moved:
             updated['home'] = str(home_path)
@@ -626,6 +629,36 @@ class WebappComponent:
         if not target.exists() or target.read_bytes() != source.read_bytes():
             atomic_bytes(target, source.read_bytes())
         return PLUGIN_NAME
+
+    def install_workspace_grants_plugin(self, home, python):
+        """Copy the workspace-grants plugin into a managed home and enable it, preserving the existing plugins.enabled list.
+
+        The plugin is the live half of the deny-by-default write boundary: it rebinds the agent's write-root lookup to the
+        component's own grants file, re-read on every file call. A different plugin with this name is never overwritten.
+        """
+        source = self.application_root / WORKSPACE_GRANTS_PLUGIN_SOURCE
+        if not (source / 'plugin.yaml').is_file():
+            raise ComponentError('The packaged workspace-grants plugin is missing from this Odysseus installation.')
+        target = Path(home) / 'plugins' / WORKSPACE_GRANTS_PLUGIN
+        if target.exists():
+            manifest = target / 'plugin.yaml'
+            if not manifest.is_file():
+                raise ComponentError('The existing workspace-grants plugin folder has no plugin.yaml; it was not overwritten.')
+            if f'name: {WORKSPACE_GRANTS_PLUGIN}' not in manifest.read_text(encoding='utf-8', errors='replace'):
+                raise ComponentError('A different plugin with this name already exists; it was not overwritten.')
+        target.mkdir(parents=True, exist_ok=True)
+        for item in source.iterdir():
+            dest = target / item.name
+            if item.is_dir():
+                shutil.copytree(item, dest, dirs_exist_ok=True)
+            else:
+                atomic_bytes(dest, item.read_bytes())
+        settings = self.home_settings(python, home)
+        enabled = [x for x in (settings.get('plugins_enabled') or []) if isinstance(x, str)]
+        if WORKSPACE_GRANTS_PLUGIN not in enabled:
+            enabled.append(WORKSPACE_GRANTS_PLUGIN)
+            self._hermes_yaml(python, _WRITE_SETTINGS, str(Path(home) / 'config.yaml'), json.dumps({'plugins': {'enabled': enabled}}))
+        return WORKSPACE_GRANTS_PLUGIN
 
     # -- validate / status -----------------------------------------------------------------
     def validate(self, config):
@@ -968,6 +1001,7 @@ class WebappComponent:
             self.validate(config)
             if not (Path(config['home']) / 'config.yaml').is_file():
                 raise ComponentError('The gateway home is missing or incomplete; run repair (it does not rebuild).')
+            self.install_workspace_grants_plugin(Path(config['home']), config['python'])
             state = self.status()['state']
             if state == 'ready':
                 return self.status()

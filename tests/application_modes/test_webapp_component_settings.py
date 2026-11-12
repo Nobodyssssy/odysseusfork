@@ -2,6 +2,7 @@
 import json
 import os
 import stat
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -278,6 +279,48 @@ class Sweep(Base):
         (base / 'not-a-release' / 'keep.txt').write_text('mine')
         self.component._sweep_releases(self.config)
         self.assertTrue((base / 'not-a-release' / 'keep.txt').exists())
+
+
+def _hermes_runtime_python():
+    """A python with ruamel.yaml (the component's yaml helper runs the Hermes runtime, not the test interpreter)."""
+    local = os.environ.get('LOCALAPPDATA', '')
+    candidates = [os.environ.get('HERMES_PYTHON'),
+                  str(Path(local) / 'hermes' / 'installs' / '562e58e2ea9aca80' / 'environments' / '6eff8cc60cb848909fbabec0b09c88c2' / 'venv' / 'Scripts' / 'python.exe')]
+    for candidate in candidates:
+        if candidate and Path(candidate).is_file():
+            probe = subprocess.run([candidate, '-c', 'import ruamel.yaml'], capture_output=True)
+            if probe.returncode == 0:
+                return candidate
+    return None
+
+
+@unittest.skipUnless(_hermes_runtime_python(), 'no Hermes runtime python with ruamel.yaml is installed here')
+class WorkspaceGrantsPluginInstall(Base):
+    def setUp(self):
+        super().setUp()
+        self.runtime = _hermes_runtime_python()
+        self.config['python'] = self.runtime
+        self.save(self.config)
+
+    def test_install_copies_the_plugin_and_merges_it_into_plugins_enabled(self):
+        self.component.install_workspace_grants_plugin(self.home, self.runtime)
+        target = self.home / 'plugins' / 'odysseus-workspace-grants'
+        self.assertTrue((target / 'plugin.yaml').is_file() and (target / '__init__.py').is_file())
+        settings = self.component.home_settings(self.runtime, self.home)
+        self.assertEqual(settings['plugins_enabled'], ['odysseus-workspace-grants'])
+        self.component.install_workspace_grants_plugin(self.home, self.runtime)   # idempotent
+        settings = self.component.home_settings(self.runtime, self.home)
+        self.assertEqual(settings['plugins_enabled'].count('odysseus-workspace-grants'), 1)
+
+    def test_existing_plugins_are_preserved_and_a_foreign_plugin_is_never_overwritten(self):
+        (self.home / 'config.yaml').write_text('_config_version: 53\nplugins:\n  enabled:\n    - agent-importers\n', encoding='utf-8')
+        self.component.install_workspace_grants_plugin(self.home, self.runtime)
+        settings = self.component.home_settings(self.runtime, self.home)
+        self.assertEqual(settings['plugins_enabled'], ['agent-importers', 'odysseus-workspace-grants'])
+        target = self.home / 'plugins' / 'odysseus-workspace-grants'
+        (target / 'plugin.yaml').write_text('name: something-else\n', encoding='utf-8')
+        with self.assertRaises(ComponentError):
+            self.component.install_workspace_grants_plugin(self.home, self.runtime)
 
 
 if __name__ == '__main__':
