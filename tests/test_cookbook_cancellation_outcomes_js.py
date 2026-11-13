@@ -98,3 +98,14 @@ def test_restore_helper_puts_the_row_back_to_running():
     body = source[start:end]
     assert "el.dataset.status = 'running';" in body
     assert "_statusLabel('running', task.type)" in body
+
+
+def test_failed_tasks_auto_expand_without_a_click():
+    """A failed serve must show its reason immediately.
+
+    Regression: only downloads auto-expanded, so a serve that died with exit
+    127 sat collapsed behind a neutral badge until the user double-clicked it.
+    """
+    source = SOURCE.read_text(encoding="utf-8")
+
+    assert "if (['error', 'crashed', 'failed'].includes(status)) return true;" in source

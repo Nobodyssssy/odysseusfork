@@ -392,9 +392,14 @@ function _serverHeaderStyle(color) {
 }
 
 function _shouldAutoExpandTaskOutput(task) {
+  const status = String(task?.status || '');
+  // A failed task must explain itself without a click. Before this, only
+  // downloads auto-expanded, so a serve that died with exit 127 sat collapsed
+  // behind a neutral badge and the user had to double-click to learn why.
+  if (['error', 'crashed', 'failed'].includes(status)) return true;
   return task?.type === 'download'
     && !task?.payload?._dep
-    && ['running', 'queued', 'error', 'crashed'].includes(String(task?.status || ''));
+    && ['running', 'queued'].includes(status);
 }
 
 function _selectTaskServer(task) {

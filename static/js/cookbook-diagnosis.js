@@ -288,6 +288,14 @@ export const ERROR_PATTERNS = [
     ],
   },
   {
+    pattern: /exit(?:ed with)? (?:code )?127|No such file or directory|The system cannot find the file specified|command not found/i,
+    message: 'The launcher stopped immediately: an executable it calls is missing or broken.',
+    suggestion: 'Suggested action: the command named a program that is not installed — a removed llama-server, a stale wrapper script pointing at a deleted path, or a missing DLL. Check the executable path in serve settings. Odysseus will not download or replace a runtime for you.',
+    fixes: [
+      { label: 'Edit serve', action: (panel) => _openServeEditFromDiagnosis(panel) },
+    ],
+  },
+  {
     pattern: /Port \d+ is already serving|port is occupied by a different model|choose another port before launching/i,
     message: 'Serve port is already occupied by another model.',
     suggestion: 'Suggested action: stop the old server or choose a different port before relaunching.',
@@ -910,11 +918,40 @@ function _diagnosisCopyBundle(task, diagnosis, sourceText, suggestionText) {
   return lines.join('\n');
 }
 
+const DISMISSED_DIAG_STORAGE_KEY = 'cookbook-diagnosis-dismissed';
+
+function _dismissedDiagnosisKeys() {
+  try {
+    const raw = localStorage.getItem(DISMISSED_DIAG_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return new Set(Array.isArray(parsed) ? parsed : []);
+  } catch {
+    return new Set();
+  }
+}
+
+function _rememberDismissedDiagnosis(key) {
+  try {
+    const keys = _dismissedDiagnosisKeys();
+    keys.add(key);
+    localStorage.setItem(DISMISSED_DIAG_STORAGE_KEY, JSON.stringify([...keys].slice(-200)));
+  } catch {}
+}
+
 export function _showDiagnosis(panel, diagnosis, sourceText) {
   const wasCollapsed = panel._lastDiagMsg === diagnosis.message && panel._diagCollapsed;
   if (panel._diagDismissed === diagnosis.message) return;
   panel._lastDiagMsg = diagnosis.message;
   panel._diagCollapsed = !!wasCollapsed;
+
+  const taskEl = panel?.closest?.('.cookbook-task');
+  const task = taskEl ? _loadTasks().find(t => t.sessionId === taskEl.dataset.taskId) : null;
+  // Dismissal must survive re-renders and refreshes: the card is rebuilt on
+  // every poll, so a per-element flag alone would reopen an error the user
+  // already closed. Keyed by task + message so an identical message on a
+  // different task is still shown.
+  const _dismissKey = (taskEl?.dataset?.taskId ? taskEl.dataset.taskId + '\u0000' : '') + diagnosis.message;
+  if (_dismissedDiagnosisKeys().has(_dismissKey)) return;
 
   let diag = panel.querySelector('.cookbook-diagnosis');
   if (!diag) {
@@ -926,8 +963,6 @@ export function _showDiagnosis(panel, diagnosis, sourceText) {
   }
   diag.classList.remove('hidden');
   diag.innerHTML = '';
-  const taskEl = panel?.closest?.('.cookbook-task');
-  const task = taskEl ? _loadTasks().find(t => t.sessionId === taskEl.dataset.taskId) : null;
   const fixes = [...(diagnosis.fixes || [])];
   if (task?.type === 'serve' && task.payload?._cmd && !fixes.some(f => f.label === 'Edit serve')) {
     fixes.push({ label: 'Edit serve', action: (p) => _openServeEditFromDiagnosis(p) });
@@ -991,6 +1026,7 @@ export function _showDiagnosis(panel, diagnosis, sourceText) {
   dismissBtn.addEventListener('click', (e) => {
     e.stopPropagation();
     panel._diagDismissed = diagnosis.message;
+    _rememberDismissedDiagnosis(_dismissKey);
     _clearDiagnosis(panel);
   });
 
