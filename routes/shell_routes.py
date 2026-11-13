@@ -1415,6 +1415,149 @@ def setup_shell_routes() -> APIRouter:
             return ""
         return _PKG_MGR[os_id].format(pkgs=" ".join(pkgs))
 
+    @router.get("/api/cookbook/llama-runtime")
+    async def llama_runtime_status(request: Request, selected: str | None = None):
+        """llama.cpp runtime state: installed builds, platform variants, validation.
+
+        This is the server-side half of the runtime picker. `selected` is the
+        path the browser has stored; it is validated here so a runtime that has
+        been moved or deleted is reported instead of silently launching
+        something else.
+        """
+        _require_admin(request)
+        _reject_cross_site(request)
+        import sys
+        from core.platform_compat import IS_APPLE_SILICON, IS_WINDOWS
+        from src import llama_runtime
+
+        driver = llama_runtime.nvidia_driver_version()
+        gpu = llama_runtime.detect_gpu()
+        variants = llama_runtime.platform_llama_variants(
+            is_windows=IS_WINDOWS,
+            is_wsl=llama_runtime.is_wsl_host(),
+            is_macos=(sys.platform == "darwin"),
+            is_apple_silicon=IS_APPLE_SILICON,
+            has_nvidia=(gpu.get("kind") == "nvidia"),
+        )
+        payload = {
+            "summary": llama_runtime.llama_runtime_summary(),
+            "variants": variants,
+            "nvidia_driver": driver,
+            "gpu": gpu,
+            "recommended": next((v["id"] for v in variants if v.get("recommended")), None),
+        }
+        if selected:
+            ok, reason = llama_runtime.validate_runtime_exe(Path(selected)) if Path(selected).is_file() else (False, "No such file.")
+            payload["selected"] = {"path": selected, "valid": ok, "detail": reason}
+        return payload
+
+    @router.get("/api/cookbook/llama-runtime/releases")
+    async def llama_runtime_release(request: Request, variant: str = "cuda"):
+        """Resolve the official prebuilt asset for a variant. Read-only."""
+        _require_admin(request)
+        _reject_cross_site(request)
+        from src import llama_runtime
+
+        try:
+            release = llama_runtime.fetch_release_manifest()
+        except Exception as exc:
+            raise HTTPException(502, f"Could not reach the llama.cpp releases API: {exc}")
+        asset = llama_runtime.select_llama_asset(release, variant)
+        if asset is None:
+            raise HTTPException(404, f"No Windows prebuilt asset for variant '{variant}' in {release.get('tag_name')}.")
+        return {
+            "tag": release.get("tag_name"),
+            "name": release.get("name"),
+            "published": release.get("published_at"),
+            "variant": variant,
+            "asset": asset,
+        }
+
+    @router.post("/api/cookbook/llama-runtime/install")
+    async def llama_runtime_install(request: Request, payload: dict):
+        """Install a prebuilt runtime into a versioned, app-managed directory.
+
+        Requires an explicit asset URL resolved from the official releases
+        endpoint (or a local archive path, for testing). Downloads are streamed
+        with progress and are cancelled if the client disconnects. Nothing is
+        activated until the extracted executable answers `--version`.
+        """
+        _require_admin(request)
+        _reject_cross_site(request)
+        from src import llama_runtime
+
+        variant = str(payload.get("variant") or "").strip()
+        url = str(payload.get("url") or "").strip()
+        tag = str(payload.get("tag") or "").strip()
+        archive_path = str(payload.get("archive_path") or "").strip()
+        if not tag:
+            raise HTTPException(400, "A release tag is required.")
+
+        if archive_path:
+            archive = Path(archive_path)
+            ok, message, info = llama_runtime.install_llama_archive(archive, tag)
+            if not ok:
+                raise HTTPException(400, message)
+            return {"ok": True, "info": info, "source": "archive"}
+
+        if not url:
+            raise HTTPException(400, "An asset URL or a local archive path is required.")
+        if not re.match(r"^https://", url):
+            raise HTTPException(400, "Only https asset URLs are accepted.")
+
+        root = llama_runtime.llama_runtime_root()
+        root.mkdir(parents=True, exist_ok=True)
+        archive = root / (re.sub(r"[^A-Za-z0-9._-]+", "-", tag) + ".download.zip")
+        return StreamingResponse(
+            _stream_llama_download(url, archive, tag),
+            media_type="text/event-stream",
+        )
+
+    @router.post("/api/cookbook/llama-runtime/rollback")
+    async def llama_runtime_rollback(request: Request, payload: dict):
+        _require_admin(request)
+        _reject_cross_site(request)
+        from src import llama_runtime
+
+        tag = str(payload.get("tag") or "").strip()
+        if not tag:
+            raise HTTPException(400, "A release tag is required.")
+        ok, message = llama_runtime.roll_back_llama_runtime(tag)
+        if not ok:
+            raise HTTPException(400, message)
+        return {"ok": True, "executable": message}
+
+    async def _stream_llama_download(url: str, archive: Path, tag: str):
+        """Download with progress; abort the install if the client goes away."""
+        import urllib.request
+        from src import llama_runtime
+
+        yield f"data: {json.dumps({'stream': 'progress', 'detail': 'starting'})}\n\n"
+        tmp = archive.with_suffix(".part")
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "Odysseus-Cookbook"})
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                total = int(resp.headers.get("Content-Length") or 0)
+                received = 0
+                with open(tmp, "wb") as fh:
+                    while True:
+                        chunk = resp.read(1 << 16)
+                        if not chunk:
+                            break
+                        fh.write(chunk)
+                        received += len(chunk)
+                        yield (f"data: {json.dumps({'stream': 'progress', 'received': received, 'total': total})}\n\n")
+        except Exception as exc:
+            tmp.unlink(missing_ok=True)
+            yield f"data: {json.dumps({'stream': 'error', 'error': str(exc)})}\n\n"
+            return
+        ok, message, info = llama_runtime.install_llama_archive(tmp, tag)
+        tmp.unlink(missing_ok=True)
+        if not ok:
+            yield f"data: {json.dumps({'stream': 'error', 'error': message})}\n\n"
+            return
+        yield f"data: {json.dumps({'stream': 'done', 'info': info})}\n\n"
+
     @router.get("/api/cookbook/packages")
     async def list_packages(
         request: Request,
@@ -1831,6 +1974,29 @@ def setup_shell_routes() -> APIRouter:
                     pkg["installed"] = None
                     pkg["status_note"] = "Only relevant for Apple Silicon / MLX image serving."
                     continue
+            # Platform gating: show only what the target can actually use.
+            _native_windows = (not host) and os.name == "nt"
+            if pkg.get("name") == "tmux" and _native_windows:
+                pkg["applicable"] = False
+                pkg["installed"] = None
+                pkg["status_note"] = (
+                    "Not the native Windows process mechanism. Cookbook manages Windows process "
+                    "trees directly; tmux is used on Linux/WSL."
+                )
+                continue
+            if pkg.get("name") == "llama_cpp":
+                if _native_windows:
+                    # The old row offered a Linux build toolchain (cmake/g++/git)
+                    # on Windows, where a prebuilt binary is the normal path.
+                    pkg["system_prereqs"] = []
+                    pkg["install_hint"] = (
+                        "Install a prebuilt llama.cpp runtime from Settings → llama.cpp Runtime "
+                        "(CUDA, Vulkan or CPU — no compiler or CUDA toolkit needed). Building "
+                        "from source is an advanced option."
+                    )
+                    pkg["prebuilt"] = True
+                else:
+                    pkg["prebuilt"] = False
             on_remote = bool(host and pkg.get("target") == "remote")
             probe = None
             if on_remote:
@@ -1865,15 +2031,42 @@ def setup_shell_routes() -> APIRouter:
                     )
                 else:
                     pkg["installed"] = shutil.which(pkg["name"]) is not None
-            elif pkg["name"] == "llama_cpp" and shutil.which("llama-server"):
-                pkg["installed"] = True
-                pkg["status_note"] = (
-                    f"native llama-server: {shutil.which('llama-server')}"
-                )
-                probe = {
-                    "binaries": {"llama-server": shutil.which("llama-server")},
-                    "dists": {},
-                }
+            elif pkg["name"] == "llama_cpp":
+                # A pip wheel is NOT a runnable llama-server, and shutil.which
+                # does not validate what it finds (on this host it returned a
+                # stale wrapper whose exec target is deleted). Check the
+                # executable before calling this dependency installed.
+                _llama_which = shutil.which("llama-server")
+                _llama_detail = ""
+                _llama_ok = False
+                if _llama_which:
+                    try:
+                        from src.llama_runtime import validate_runtime_exe
+                        _llama_ok, _llama_detail = validate_runtime_exe(Path(_llama_which))
+                    except Exception:
+                        _llama_ok = False
+                if _llama_ok:
+                    pkg["installed"] = True
+                    pkg["status_note"] = f"native llama-server: {_llama_which} ({_llama_detail})"
+                    probe = {"binaries": {"llama-server": _llama_which}, "dists": {}}
+                else:
+                    try:
+                        _llama_dist = importlib_metadata.version(_pip_dist_name(pkg))
+                    except Exception:
+                        _llama_dist = None
+                    pkg["installed"] = False
+                    pkg["partial"] = bool(_llama_dist)
+                    if _llama_dist:
+                        pkg["status_note"] = (
+                            f"Python package only (llama-cpp-python {_llama_dist}) — no runnable "
+                            "llama-server. Cookbook launches the standalone executable; install a "
+                            "prebuilt llama.cpp runtime."
+                        )
+                    else:
+                        pkg["status_note"] = (
+                            "No runnable llama-server found. Install a prebuilt llama.cpp runtime."
+                        )
+                    probe = {"binaries": {}, "dists": {"llama-cpp-python": _llama_dist} if _llama_dist else {}}
             elif pkg["name"] == "vllm":
                 _vllm_cli = shutil.which("vllm")
                 pkg["installed"] = _vllm_cli is not None
