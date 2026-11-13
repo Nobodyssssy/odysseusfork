@@ -75,7 +75,7 @@ function _platformIcon(platform) {
   return '';
 }
 
-export let _envState = { env: 'none', envPath: '', hfToken: '', hfTokenConfigured: false, hfTokenMasked: '', gpus: '', remoteHost: '', servers: [], modelPaths: [], platform: '', hostPlatform: '', defaultServer: '' };
+export let _envState = { env: 'none', envPath: '', hfToken: '', hfTokenConfigured: false, hfTokenMasked: '', gpus: '', remoteHost: '', servers: [], modelPaths: [], platform: '', hostPlatform: '', defaultServer: '', llamaServerPath: '' };
 let _lastCacheHostVal = null;
 let _cookbookOpeningSpinners = [];
 export function _lastCacheHost() { return _lastCacheHostVal; }
@@ -1056,6 +1056,93 @@ export function _persistEnvState() {
   try { localStorage.setItem(LAST_STATE_KEY, JSON.stringify(_envStateForStorage())); }
   catch (_) {}
   _saveTasks(_loadTasks());
+}
+
+// ── llama.cpp runtime picker ────────────────────────────────────────────
+// Server-side discovery (GET /api/cookbook/llama-servers) is the safe selection
+// mechanism: the browser never supplies an unrestricted filesystem path. A
+// candidate is only selectable when the server validated it by running
+// `--version`; a stale wrapper shows up disabled with its reason.
+
+export async function _locateLlamaServer() {
+  const overlay = document.createElement('div');
+  overlay.className = 'cookbook-llama-picker';
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;z-index:12000;';
+  overlay.innerHTML = '<div class="admin-card" style="width:min(640px,92vw);max-height:80vh;overflow:auto;display:flex;flex-direction:column;gap:8px;"></div>';
+  const card = overlay.firstChild;
+  card.innerHTML = '<h2 style="margin:0;">Locate llama-server</h2>'
+    + '<p class="memory-desc doclib-desc">Executables found on this machine. Only validated ones can be selected; a broken or stale wrapper is shown disabled.</p>'
+    + '<div class="cookbook-llama-cand" style="display:flex;flex-direction:column;gap:6px;"></div>'
+    + '<div class="cookbook-llama-actions" style="display:flex;gap:6px;justify-content:flex-end;margin-top:6px;"></div>';
+  document.body.appendChild(overlay);
+  const close = () => { overlay.remove(); };
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+  const actions = card.querySelector('.cookbook-llama-actions');
+  const cancelBtn = document.createElement('button');
+  cancelBtn.type = 'button';
+  cancelBtn.className = 'hwfit-gpu-btn';
+  cancelBtn.textContent = 'Cancel';
+  cancelBtn.addEventListener('click', close);
+  const useBtn = document.createElement('button');
+  useBtn.type = 'button';
+  useBtn.className = 'hwfit-gpu-btn';
+  useBtn.textContent = 'Use this executable';
+  useBtn.disabled = true;
+  useBtn.style.opacity = '0.6';
+  actions.appendChild(cancelBtn);
+  actions.appendChild(useBtn);
+
+  const box = card.querySelector('.cookbook-llama-cand');
+  box.innerHTML = '<div class="hwfit-loading" style="padding:10px;">Scanning…</div>';
+  let data = null;
+  try {
+    const res = await _fetchCookbookUiWithTimeout('/api/cookbook/llama-servers', { credentials: 'same-origin' }, 30000);
+    data = await res.json();
+  } catch (e) {
+    box.innerHTML = `<div style="color:var(--red);font-size:12px;">Could not scan this machine: ${esc(e.message)}</div>`;
+    return;
+  }
+  const cands = (data && Array.isArray(data.candidates)) ? data.candidates : [];
+  if (!cands.length) {
+    box.innerHTML = '<div style="font-size:12px;line-height:1.4;">No llama-server executable was found in the usual build locations or on PATH.<br>'
+      + 'Install llama.cpp yourself, then choose Locate executable again. Cookbook will not download or replace a runtime for you.</div>';
+    return;
+  }
+  box.innerHTML = '';
+  let chosen = '';
+  cands.forEach((c) => {
+    const row = document.createElement('label');
+    row.style.cssText = 'display:flex;gap:8px;align-items:flex-start;padding:6px;border:1px solid var(--border,#333);border-radius:4px;'
+      + (c.valid ? 'cursor:pointer;' : 'cursor:not-allowed;opacity:.6;');
+    const radio = document.createElement('input');
+    radio.type = 'radio';
+    radio.name = 'cookbook-llama-cand';
+    radio.value = c.path || '';
+    radio.disabled = !c.valid;
+    row.appendChild(radio);
+    const txt = document.createElement('div');
+    txt.style.cssText = 'flex:1;min-width:0;font-size:11px;';
+    txt.innerHTML = `<div style="font-family:monospace;word-break:break-all;">${esc(c.path || '')}</div>`
+      // c.path / c.kind / c.detail are server-supplied; esc() neutralises them.
+      + `<div style="opacity:.75;">${c.valid ? `usable · ${esc(c.kind || 'unknown')} build` : 'not usable — ' + esc(c.detail || 'unverified')}</div>`;
+    row.appendChild(txt);
+    box.appendChild(row);
+    radio.addEventListener('change', () => {
+      chosen = radio.value;
+      useBtn.disabled = !chosen;
+      useBtn.style.opacity = chosen ? '1' : '0.6';
+    });
+  });
+  useBtn.addEventListener('click', () => {
+    if (!chosen) return;
+    _envState.llamaServerPath = chosen;
+    try { _persistEnvState(); } catch {}
+    const inp = document.getElementById('cookbook-llama-path');
+    if (inp) inp.value = chosen;
+    const st = document.getElementById('cookbook-llama-status');
+    if (st) st.textContent = `Selected: ${chosen}`;
+    close();
+  });
 }
 
 // ── Dependencies ──
@@ -2993,6 +3080,35 @@ function _wireTabEvents(body) {
   // one, appending two rows per click — removed.
 
 
+  // ── llama.cpp runtime: manual path + "Locate executable" picker ──────
+  const _llamaPathInput = document.getElementById('cookbook-llama-path');
+  const _llamaStatus = document.getElementById('cookbook-llama-status');
+  const _renderLlamaStatus = () => {
+    if (!_llamaStatus) return;
+    const p = (_envState.llamaServerPath || '').trim();
+    _llamaStatus.textContent = p
+      ? `Selected: ${p}`
+      : 'No runtime selected — Cookbook discovers a usable llama-server at launch.';
+  };
+  if (_llamaPathInput) {
+    _llamaPathInput.addEventListener('change', () => {
+      _envState.llamaServerPath = _llamaPathInput.value.trim();
+      try { _persistEnvState(); } catch {}
+      _renderLlamaStatus();
+    });
+  }
+  const _llamaClearBtn = document.getElementById('cookbook-llama-clear');
+  if (_llamaClearBtn) _llamaClearBtn.addEventListener('click', () => {
+    _envState.llamaServerPath = '';
+    if (_llamaPathInput) _llamaPathInput.value = '';
+    try { _persistEnvState(); } catch {}
+    _renderLlamaStatus();
+  });
+  const _llamaLocateBtn = document.getElementById('cookbook-llama-locate');
+  if (_llamaLocateBtn) _llamaLocateBtn.addEventListener('click', () => _locateLlamaServer());
+  _renderLlamaStatus();
+
+
   // HF token — save on change
   const hfInput = document.getElementById('hwfit-hftoken');
   if (hfInput) {
@@ -3372,6 +3488,22 @@ function _renderRecipes() {
   // HF Token and Server config look like distinct panels (matches the
   // Download tab's block-per-section layout).
   html += '<div class="cookbook-group hidden cookbook-settings-stack" data-backend-group="Settings">';
+
+  // ── llama.cpp runtime block ─────────────────────────────────────────
+  html += '<div class="admin-card" style="flex:0 0 auto;display:flex;flex-direction:column;">';
+  html += '<div style="display:flex;align-items:baseline;gap:8px;margin-bottom:2px;">';
+  html += '<h2 style="margin:0;padding:0;line-height:1;">llama.cpp Runtime</h2>';
+  html += '</div>';
+  html += '<p class="memory-desc doclib-desc">Executable used when launching a GGUF model through llama.cpp on this machine. Leave empty to let Cookbook discover one. Cookbook never downloads or replaces a runtime.</p>';
+  html += '<div class="memory-toolbar">';
+  html += `<div style="display:flex;gap:4px;align-items:center;">`;
+  html += `<input type="text" class="memory-search-input" id="cookbook-llama-path" value="${esc(_es.llamaServerPath || '')}" placeholder="C:\\path\\to\\llama-server.exe" style="flex:1;font-family:monospace;font-size:11px;" spellcheck="false" />`;
+  html += `<button type="button" class="hwfit-gpu-btn" id="cookbook-llama-locate" style="height:26px;padding:3px 10px;white-space:nowrap;">Locate executable</button>`;
+  html += `<button type="button" class="hwfit-gpu-btn" id="cookbook-llama-clear" style="height:26px;padding:3px 10px;white-space:nowrap;">Clear</button>`;
+  html += `</div>`;
+  html += `<div id="cookbook-llama-status" style="font-size:11px;margin-top:4px;opacity:0.75;"></div>`;
+  html += '</div>';
+  html += '</div>';
 
   // ── HuggingFace Token block ─────────────────────────────────────────
   html += '<div class="admin-card" style="flex:0 0 auto;display:flex;flex-direction:column;">';

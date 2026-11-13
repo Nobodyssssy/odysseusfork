@@ -15,6 +15,7 @@ import uuid
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request, Depends
+from starlette.responses import JSONResponse
 
 from src.auth_helpers import require_user
 from src.constants import COOKBOOK_STATE_FILE
@@ -68,6 +69,7 @@ from routes.cookbook_helpers import (
     _append_llama_server_shim_reconciliation_lines,
     _append_llama_server_finalization_lines,
     _append_windows_llama_server_preflight_lines,
+    discover_llama_server_candidates, validate_llama_server_path,
     ModelDownloadRequest, ServeRequest,
 )
 
@@ -1426,6 +1428,25 @@ def setup_cookbook_routes() -> APIRouter:
 
         return {"ok": True, "session_id": session_id, "remote": remote or "local"}
 
+    @router.get("/api/cookbook/llama-servers")
+    async def llama_servers(request: Request):
+        """Discover and validate llama.cpp executables on this host.
+
+        Powers the "Locate executable" picker. Discovery is read-only and local:
+        nothing is downloaded, created or replaced, and a stale wrapper is
+        reported as unusable rather than offered. Admin authorization matches
+        the other cookbook mutation endpoints.
+        """
+        require_admin(request)
+        host = validate_remote_host(request.query_params.get("host"))
+        if host:
+            return {
+                "candidates": [],
+                "remote_unsupported": True,
+                "error": "Executable discovery is only available on the local host.",
+            }
+        return discover_llama_server_candidates()
+
     @router.get("/api/model/cached")
     async def model_cached(request: Request, host: str | None = None, model_dir: str | None = None, ssh_port: str | None = None, platform: str | None = None):
         """List cached models. Scans HF cache + optional model directory."""
@@ -1971,8 +1992,20 @@ def setup_cookbook_routes() -> APIRouter:
                 # Native Windows: never run the POSIX source-build block. Resolve
                 # and validate an existing executable instead, and fail closed
                 # with a reason when none is usable (a stale ~/bin wrapper must
-                # not be launched).
-                _append_windows_llama_server_preflight_lines(runner_lines)
+                # not be launched). A path chosen in Settings is used as-is.
+                _configured_llama = ""
+                if req.llama_server:
+                    _validated_llama, _llama_reason = validate_llama_server_path(req.llama_server)
+                    if _validated_llama:
+                        _configured_llama = _validated_llama
+                    else:
+                        # Reject the launch rather than silently ignoring the
+                        # user's choice and starting a different runtime.
+                        return JSONResponse(
+                            status_code=400,
+                            content={"ok": False, "error": f"Invalid llama-server path: {_llama_reason}"},
+                        )
+                _append_windows_llama_server_preflight_lines(runner_lines, _configured_llama)
             if ("llama_cpp" in req.cmd or "llama-server" in req.cmd) and not local_windows_llama_cmd:
                 # Prefer the NATIVE llama-server binary — its minja templating
                 # renders modern GGUF chat templates that the Python bindings'

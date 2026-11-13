@@ -8,6 +8,7 @@ import os
 import posixpath
 import re
 import shlex
+import subprocess
 from pathlib import Path
 
 from fastapi import HTTPException
@@ -1230,7 +1231,154 @@ def _append_llama_server_finalization_lines(runner_lines: list[str], platform_hi
     runner_lines.append('fi')
 
 
-def _append_windows_llama_server_preflight_lines(runner_lines: list[str]) -> None:
+def _llama_server_kind(version_text: str, path: str) -> str:
+    """Best-effort CUDA/CPU classification from --version output and path.
+
+    llama.cpp prints the active backend in ``--version`` (``CUDA``, ``BLAS``,
+    ``Metal``, …); the build directory name is a useful second signal. Anything
+    ambiguous is reported as ``unknown`` rather than guessed.
+    """
+    hay = f"{version_text or ''} {path or ''}"
+    if re.search(r"cuda|cublas|cu1[12]\d", hay, re.I):
+        return "cuda"
+    if re.search(r"\bcpu\b|openblas|blas|metal|vulkan|sycl", hay, re.I):
+        return "cpu"
+    if re.search(r"build[-_ ]?cuda|cuda", hay, re.I):
+        return "cuda"
+    return "unknown"
+
+
+def _probe_llama_server_via_bash(path: Path) -> tuple[bool, str, str]:
+    """Verify a Windows shell wrapper the way the runner launches it.
+
+    The path is passed as ``$1`` to a fixed script string — it is never
+    concatenated into the shell command, so spaces or quotes in the path cannot
+    change what runs.
+    """
+    try:
+        from core.platform_compat import find_bash
+    except Exception:
+        find_bash = None  # type: ignore[assignment]
+    bash = (find_bash() if find_bash else None) or "bash"
+    try:
+        proc = subprocess.run(
+            [bash, "-c", 'exec "$1" --version', "_", str(path)],
+            capture_output=True, text=True, timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, f"could not be run through bash: {exc}", "unknown"
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip().splitlines()
+        return False, (detail[0] if detail else f"exit {proc.returncode}"), "unknown"
+    text = (proc.stdout or "").strip()
+    return True, text.splitlines()[0] if text else "", _llama_server_kind(text, str(path))
+
+
+def _probe_llama_server(path: Path) -> tuple[bool, str, str]:
+    """Run ``<path> --version``. Returns (usable, version_text, kind).
+
+    The executable is invoked directly with an argument array — never through a
+    shell — so a path containing spaces or quotes cannot change what runs.
+    """
+    try:
+        proc = subprocess.run(
+            [str(path), "--version"],
+            capture_output=True, text=True, timeout=30,
+        )
+    except OSError as exc:
+        # On Windows a shell script/wrapper is not a valid Win32 image, so
+        # Python refuses to execute it directly (WinError 193). The runner
+        # launches through Git Bash, so verify the script the same way rather
+        # than rejecting a wrapper that actually works. A broken wrapper (its
+        # target deleted) still fails here and is reported unusable.
+        if os.name == "nt" and getattr(exc, "winerror", None) in (193, 216):
+            return _probe_llama_server_via_bash(path)
+        return False, f"could not be run: {exc}", "unknown"
+    except subprocess.SubprocessError as exc:
+        return False, f"could not be run: {exc}", "unknown"
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip().splitlines()
+        return False, (detail[0] if detail else f"exit {proc.returncode}"), "unknown"
+    text = (proc.stdout or "").strip()
+    return True, text.splitlines()[0] if text else "", _llama_server_kind(text, str(path))
+
+
+def validate_llama_server_path(path: str) -> tuple[str | None, str | None]:
+    """Validate a user-supplied llama-server executable.
+
+    Returns ``(native_path, None)`` or ``(None, reason)``. The path is checked as
+    a file on disk and then executed only as ``<path> --version``; it is never
+    interpolated into a shell command string. Symbolic links and junctions are
+    rejected so a link cannot be repointed after validation.
+    """
+    raw = str(path or "").strip().strip('"').strip("'")
+    if not raw:
+        return None, "No executable path was provided."
+    if "\x00" in raw:
+        return None, "The path contains a NUL byte."
+    candidate = Path(raw)
+    if not candidate.is_absolute():
+        return None, "An absolute path is required."
+    try:
+        if candidate.is_symlink():
+            return None, "Symbolic links and junctions are not accepted."
+        if not candidate.is_file():
+            return None, "No such file — the executable does not exist at that path."
+    except OSError as exc:
+        return None, f"The path could not be read: {exc}"
+    usable, detail, _kind = _probe_llama_server(candidate)
+    if not usable:
+        return None, f"The file is not a usable llama-server ({detail})."
+    return str(candidate), None
+
+
+def discover_llama_server_candidates() -> dict:
+    """Find and validate llama.cpp executables on THIS host.
+
+    Discovery is deliberately conservative: a known list of build/output
+    directories plus PATH, de-duplicated, and every hit is executed with
+    ``--version`` so a stale wrapper or a broken install is reported as
+    unusable instead of being offered. Nothing is downloaded or created.
+    """
+    search: list[Path] = []
+    home = Path.home()
+    search.append(home / "bin")
+    for pattern in ("llama.cpp/build*/bin/*", "llama.cpp/build/bin/*", "llama.cpp/build*/bin"):
+        try:
+            search.extend(sorted(home.glob(pattern)))
+        except OSError:
+            pass
+    for entry in os.environ.get("PATH", "").split(os.pathsep):
+        if entry:
+            search.append(Path(entry))
+
+    seen: set[str] = set()
+    candidates: list[dict] = []
+    for directory in search:
+        for name in ("llama-server.exe", "llama-server"):
+            try:
+                hit = directory / name
+                if not hit.is_file() or hit.is_symlink():
+                    continue
+                key = str(hit.resolve())
+                if key in seen:
+                    continue
+                seen.add(key)
+            except OSError:
+                continue
+            usable, detail, kind = _probe_llama_server(hit)
+            candidates.append({
+                "path": str(hit),
+                "name": name,
+                "kind": kind,
+                "valid": usable,
+                "detail": detail,
+            })
+    candidates.sort(key=lambda c: (not c["valid"], c["path"]))
+    return {"candidates": candidates}
+
+
+def _append_windows_llama_server_preflight_lines(runner_lines: list[str], configured_path: str = "") -> None:
     """Resolve a usable native llama-server on Windows, or fail closed.
 
     The POSIX block builds llama.cpp from source; that is wrong on Windows,
@@ -1242,7 +1390,24 @@ def _append_windows_llama_server_preflight_lines(runner_lines: list[str]) -> Non
     of starting a process that cannot work.
     """
     _append_llama_server_shim_definition_lines(runner_lines)
-    runner_lines.append('_odysseus_resolve_llama_server || true')
+    if configured_path:
+        # A path chosen in Settings is used as-is, but it is re-validated here:
+        # the file may have been moved or deleted since it was selected. If it
+        # no longer answers --version we fall back to discovery rather than
+        # launching a path that is known to be broken.
+        runner_lines.append(f'_odysseus_llama_bin=\'{_bash_squote(str(configured_path))}\'')
+        runner_lines.append('if "$_odysseus_llama_bin" --version >/dev/null 2>&1; then')
+        runner_lines.append('  echo "[odysseus] llama-server (configured): $_odysseus_llama_bin"')
+        runner_lines.append('  hash -r')
+        runner_lines.append('  _odysseus_llama_configured=1')
+        runner_lines.append('else')
+        runner_lines.append('  echo "WARNING: the configured llama-server is no longer usable: $_odysseus_llama_bin"')
+        runner_lines.append('  echo "  It did not answer --version; falling back to discovery. Re-run Locate executable in Settings."')
+        runner_lines.append('  _odysseus_llama_bin=""')
+        runner_lines.append('fi')
+        runner_lines.append('if [ -z "$_odysseus_llama_bin" ]; then _odysseus_resolve_llama_server || true; fi')
+    else:
+        runner_lines.append('_odysseus_resolve_llama_server || true')
     runner_lines.append('if [ -n "$_odysseus_llama_bin" ]; then')
     runner_lines.append('  echo "[odysseus] llama-server: $_odysseus_llama_bin"')
     runner_lines.append('  hash -r')
@@ -1316,6 +1481,10 @@ class ServeRequest(BaseModel):
     # with older callers; catalog-backed launches can set this without relying
     # on model-name heuristics in the generated runner.
     runtime_adapter: str | None = None
+    # Optional llama.cpp executable chosen in Settings ("Locate executable").
+    # Validated server-side before it is ever put into a runner; the runner
+    # re-validates it and falls back to discovery if it has disappeared.
+    llama_server: str | None = None
 
 
 def _parse_serve_phase(snapshot: str, task_type: str = "serve") -> dict:

@@ -292,6 +292,7 @@ export const ERROR_PATTERNS = [
     message: 'The launcher stopped immediately: an executable it calls is missing or broken.',
     suggestion: 'Suggested action: the command named a program that is not installed — a removed llama-server, a stale wrapper script pointing at a deleted path, or a missing DLL. Check the executable path in serve settings. Odysseus will not download or replace a runtime for you.',
     fixes: [
+      { label: 'Locate executable', action: () => _openLlamaRuntimeSettings() },
       { label: 'Edit serve', action: (panel) => _openServeEditFromDiagnosis(panel) },
     ],
   },
@@ -919,6 +920,18 @@ function _diagnosisCopyBundle(task, diagnosis, sourceText, suggestionText) {
 }
 
 const DISMISSED_DIAG_STORAGE_KEY = 'cookbook-diagnosis-dismissed';
+
+// Open Settings and focus the llama.cpp runtime picker. Deliberately DOM-only:
+// this module is imported by both the cookbook and download panels, so it must
+// not depend on cookbook.js's imports.
+function _openLlamaRuntimeSettings() {
+  const tab = document.querySelector('#cookbook-modal .cookbook-tab[data-backend="Settings"]');
+  if (tab) tab.click();
+  setTimeout(() => {
+    const btn = document.getElementById('cookbook-llama-locate');
+    if (btn) { btn.focus(); btn.scrollIntoView({ block: 'nearest' }); }
+  }, 60);
+}
 
 function _dismissedDiagnosisKeys() {
   try {

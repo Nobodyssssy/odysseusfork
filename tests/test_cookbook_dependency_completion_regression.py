@@ -1057,6 +1057,7 @@ async def test_generated_runner_preflight_retires_stale_shim_before_backend_sele
     2. Executing the generated runner script retires the stale ~/bin/llama-server shim
     3. Resolves to the healthy native binary without attempting source build or pip fallback.
     """
+    from types import SimpleNamespace
     from unittest.mock import AsyncMock, MagicMock
     from routes.cookbook_helpers import ServeRequest
     import routes.cookbook_routes as cookbook_routes
@@ -1278,8 +1279,8 @@ def test_broken_native_and_missing_python_backend_sets_preflight_127(tmp_path):
 async def test_generated_runner_broken_first_healthy_second_e2e(monkeypatch, tmp_path):
     """Integration regression: The full generated Cookbook runner script must launch the healthy
     native candidate even when an earlier broken candidate exists on PATH."""
-    from unittest.mock import AsyncMock, MagicMock
     from types import SimpleNamespace
+    from unittest.mock import AsyncMock, MagicMock
     from routes.cookbook_helpers import ServeRequest
     import routes.cookbook_routes as cookbook_routes
     from starlette.requests import Request
@@ -1435,3 +1436,73 @@ async def test_local_windows_llama_serve_validates_before_launch(monkeypatch, tm
     )
     assert "RUN_NATIVE: -m /dummy/model.gguf --port 8085" in res2.stdout
     assert "no usable llama-server" not in res2.stdout
+
+
+@pytest.mark.asyncio
+async def test_local_windows_llama_serve_uses_configured_executable(monkeypatch, tmp_path):
+    """A validated executable chosen in Settings must be the one that launches.
+
+    The server validates the path before it reaches the runner (absolute, real
+    file, answers --version) and the runner re-validates it, falling back to
+    discovery if it disappeared.
+    """
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, MagicMock
+    from routes.cookbook_helpers import ServeRequest
+    import routes.cookbook_routes as cookbook_routes
+    from starlette.requests import Request
+
+    fake_home = tmp_path / "fake_home"
+    _write_mock_native(fake_home / "llama.cpp/build/bin/Release/llama-server.exe", succeeds=True)
+    configured = fake_home / "llama.cpp/build/bin/Release/llama-server.exe"
+
+    tmux_log_dir = tmp_path / "tmux_logs"
+    tmux_log_dir.mkdir(parents=True)
+    monkeypatch.setattr(cookbook_routes, "TMUX_LOG_DIR", tmux_log_dir)
+    monkeypatch.setattr(cookbook_routes, "require_admin", lambda request: None)
+    monkeypatch.setattr(cookbook_routes, "_binary_available", AsyncMock(return_value=True))
+    monkeypatch.setattr(cookbook_routes, "load_stored_hf_token", lambda **kwargs: "")
+    monkeypatch.setattr("core.database.SessionLocal", MagicMock())
+
+    class _Proc:
+        returncode = 0
+        stderr = None
+        async def wait(self):
+            return 0
+    monkeypatch.setattr(cookbook_routes.asyncio, "create_subprocess_shell", AsyncMock(return_value=_Proc()))
+
+    router = cookbook_routes.setup_cookbook_routes()
+    endpoint = next(
+        r.endpoint for r in router.routes
+        if r.path == "/api/model/serve" and "POST" in r.methods
+    )
+
+    def _post(llama_server):
+        http_req = Request({
+            "type": "http", "method": "POST", "path": "/api/model/serve", "headers": [],
+            "app": SimpleNamespace(state=SimpleNamespace(auth_manager=SimpleNamespace(
+                is_configured=True, is_admin=lambda user: user == "admin"))),
+        })
+        http_req.state.current_user = "admin"
+        http_req.state.local_model_authority = True
+        return endpoint(http_req, ServeRequest(
+            repo_id="test/repo", cmd="llama-server -m /dummy/model.gguf --port 8085",
+            remote_host=None, llama_server=llama_server))
+
+    resp = await _post(str(configured))
+    assert resp["ok"] is True, resp
+    runner_file = tmux_log_dir / f"{resp['session_id']}_run.sh"
+    script = runner_file.read_text(encoding="utf-8")
+    assert "llama-server (configured)" in script
+
+    res = _run_shell(
+        fake_home, [git_bash_path(runner_file)],
+        path=f"{git_bash_path(configured.parent)}:/usr/bin:/bin",
+    )
+    assert "llama-server (configured)" in res.stdout
+    assert "RUN_NATIVE: -m /dummy/model.gguf --port 8085" in res.stdout
+
+    # An unusable configured path is rejected outright — never silently ignored.
+    bad = await _post(str(fake_home / "missing" / "llama-server.exe"))
+    assert bad.status_code == 400
+    assert "Invalid llama-server path" in bad.body.decode()

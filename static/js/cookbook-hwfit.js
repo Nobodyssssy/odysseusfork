@@ -2021,6 +2021,9 @@ export function _expandModelRow(row, modelData) {
         gpus: _envState.gpus || cudaDevices || undefined,
         platform: _envState.platform || undefined,
         runtime_adapter: modelData.runtime_adapter || undefined,
+        // Selected in Settings > llama.cpp Runtime. Validated server-side before
+        // it reaches the runner, and re-validated there before launch.
+        llama_server: _envState.llamaServerPath || undefined,
       };
 
       try {
