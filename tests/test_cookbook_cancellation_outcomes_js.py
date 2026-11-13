@@ -73,11 +73,20 @@ def test_stop_explains_a_refused_unverified_or_recycled_pid():
     assert handler.index("if (stopNote) {") < handler.index("_animateOutThenRemove(el, task.sessionId);")
 
 
-def test_kill_handler_warns_when_the_record_failed_but_still_kills():
+def test_force_kill_requires_explicit_authorisation_when_the_record_fails():
+    """Force stop is the emergency path; it must not kill unrecorded."""
     source = _source()
     handler = _between(source, ".cookbook-task-action-kill').addEventListener",
                         ".cookbook-task-action-retry')")
     assert "const recorded = await _requestTaskCancel(task);" in handler
+    gate = handler.index("if (!recorded) {")
+    confirm = handler.index("uiModule.styledConfirm(", gate)
+    abort = handler.index("if (!authorised) {", confirm)
+    kill = handler.index("_tmuxGracefulKill(task)", abort)
+    # The kill is reached only after an explicit confirmation.
+    assert "confirmText: 'Force stop'" in handler[confirm:abort]
+    assert "return;" in handler[abort:kill]
+    # And it still says so afterwards rather than implying a recorded cancel.
     assert "the cancellation could not be recorded on the server" in handler
 
 

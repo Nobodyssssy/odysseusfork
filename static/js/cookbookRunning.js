@@ -3074,6 +3074,22 @@ export function _renderRunningTab() {
     // row disappeared from the UI.
     el.querySelector('.cookbook-task-action-kill').addEventListener('click', async () => {
       const recorded = await _requestTaskCancel(task);
+      // Force stop is the emergency intervention. Killing without a durable
+      // record leaves the persistent state inconsistent — the task can come
+      // back on the next poll, on another device, or after a restart — so it
+      // needs explicit authorisation, not just a click.
+      if (!recorded) {
+        let authorised = false;
+        try {
+          authorised = await uiModule.styledConfirm(
+            'The cancellation could not be recorded on the server. Force-stop anyway? The task may reappear after a refresh.',
+            { confirmText: 'Force stop', danger: true });
+        } catch { authorised = false; }
+        if (!authorised) {
+          try { uiModule.showToast('Force stop cancelled — the task was left running.', 'error'); } catch {}
+          return;
+        }
+      }
       const outputText = el.querySelector('.cookbook-output-pre')?.textContent || task.output || '';
       const isLive = task.type === 'serve' && ['running', 'ready', 'loading', 'warming', 'starting'].includes(task.status || '');
       const ollamaUnload = _ollamaUnloadCommand(task, outputText);
