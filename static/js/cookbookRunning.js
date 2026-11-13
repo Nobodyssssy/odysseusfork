@@ -1033,6 +1033,23 @@ export function _safeSessionId(task) {
   return _SESSION_ID_RE.test(sid) ? sid : '';
 }
 
+// Record a cancellation on the server before signalling anything. The on-disk
+// state is the source of truth for cross-device sync and survives a page
+// refresh or an Odysseus restart; browser storage alone would not. Best-effort:
+// if the write fails the kill still proceeds, and the poller reports the task
+// from liveness as it did before.
+async function _requestTaskCancel(task) {
+  const sid = _safeSessionId(task);
+  if (!sid) return;
+  try {
+    await _fetchWithTimeout('/api/cookbook/tasks/cancel', {
+      method: 'POST', credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: sid }),
+    });
+  } catch {}
+}
+
 function _winSessionCmd(task, tmuxArgs) {
   const host = _taskRemoteHost(task);
   const sd = host ? '$env:TEMP\\odysseus-sessions' : '$env:TEMP\\odysseus-tmux';
@@ -2970,6 +2987,7 @@ export function _renderRunningTab() {
       if (badge) { badge.textContent = 'stopping...'; badge.className = 'cookbook-task-status cookbook-task-stopping'; }
       el.dataset.status = 'stopped';
       _updateTask(task.sessionId, { _userStopped: true });
+      await _requestTaskCancel(task);
       const outputText = el.querySelector('.cookbook-output-pre')?.textContent || task.output || '';
       // Drop the model endpoint so the picker stops listing it.
       if (task.type === 'serve' && task.payload) {
@@ -3004,6 +3022,7 @@ export function _renderRunningTab() {
     // already exited) silently left the live serve running while the
     // row disappeared from the UI.
     el.querySelector('.cookbook-task-action-kill').addEventListener('click', async () => {
+      await _requestTaskCancel(task);
       const outputText = el.querySelector('.cookbook-output-pre')?.textContent || task.output || '';
       const isLive = task.type === 'serve' && ['running', 'ready', 'loading', 'warming', 'starting'].includes(task.status || '');
       const ollamaUnload = _ollamaUnloadCommand(task, outputText);
@@ -4096,6 +4115,9 @@ async function _selfHealStaleTasksImpl(opts = {}) {
     // reports the session as up). This was the main source of finished↔
     // downloading oscillation on a flaky connection.
     if (t.status === 'done' && /DOWNLOAD_OK|\/snapshots\//.test(t.output || '')) return false;
+    // A recorded cancellation is deliberate: the server owns the state, and
+    // flipping this back to running would undo the user's Stop.
+    if (t._cancelRequestedAt) return false;
     // Cooldown: never flip the same task more than once every 45s. A flapping
     // SSH connection used to drive the badge back-and-forth on every probe
     // cycle; this enforces a stable view between flaps.

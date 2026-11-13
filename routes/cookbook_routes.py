@@ -18,6 +18,8 @@ from fastapi import APIRouter, HTTPException, Request, Depends
 
 from src.auth_helpers import require_user
 from src.constants import COOKBOOK_STATE_FILE
+
+_COOKBOOK_STATE_PATH = Path(COOKBOOK_STATE_FILE)
 from pydantic import BaseModel
 
 from core.middleware import require_admin
@@ -121,6 +123,65 @@ def _local_pid_is_owned(pid, session_id: str) -> bool:
     from src.process_ownership import OWNED, verify
 
     return verify(pid, token) == OWNED
+
+
+#: Task statuses that mean "the user asked for this to stop". ``cancel_requested``
+#: is a request; ``stopped`` is a verified outcome. The distinction matters
+#: because a cancellation is only honest once liveness was actually observed.
+CANCEL_REQUESTED = "cancel_requested"
+CANCELLED_STATUSES = {"cancel_requested", "stopped", "canceled", "cancelled"}
+
+
+def _set_task_status(session_id: str, status: str, *, stamp: bool = False) -> dict:
+    """Atomically set one task's status in the on-disk cookbook state.
+
+    The state file is the single source of truth for cross-device sync, so a
+    cancellation has to land there rather than in browser storage: it must
+    survive a page refresh, an Odysseus restart and a second device. The
+    read-modify-write is serialised through the shared store lock so a
+    concurrent save cannot lose the update.
+
+    ``stamp`` records ``_cancelRequestedAt`` when a cancellation is first
+    requested; that mark is what stops the self-heal loop from later flipping a
+    deliberately stopped task back to running.
+
+    Returns ``{"changed", "found", "previous"}``; never raises for a state the
+    caller cannot read or write.
+    """
+    from core.atomic_io import atomic_write_json, store_transaction
+
+    @store_transaction(lambda: _COOKBOOK_STATE_PATH)
+    def _apply() -> dict:
+        try:
+            raw = _COOKBOOK_STATE_PATH.read_text(encoding="utf-8") if _COOKBOOK_STATE_PATH.exists() else ""
+            state = json.loads(raw) if raw.strip() else {}
+        except Exception:
+            state = {}
+        if not isinstance(state, dict):
+            return {"changed": False, "found": False, "previous": None, "error": "unreadable state"}
+        tasks = state.get("tasks")
+        containers = []
+        if isinstance(tasks, list):
+            containers = [t for t in tasks if isinstance(t, dict)]
+        elif isinstance(tasks, dict):
+            containers = [t for t in tasks.values() if isinstance(t, dict)]
+        for task in containers:
+            if task.get("sessionId") != session_id:
+                continue
+            previous = task.get("status")
+            changed = previous != status
+            if changed:
+                task["status"] = status
+                if stamp:
+                    task["_cancelRequestedAt"] = time.time()
+                try:
+                    atomic_write_json(str(_COOKBOOK_STATE_PATH), state, indent=2)
+                except Exception as exc:
+                    return {"changed": False, "found": True, "previous": previous, "error": str(exc)[:160]}
+            return {"changed": changed, "found": True, "previous": previous}
+        return {"changed": False, "found": False, "previous": None}
+
+    return _apply()
 
 
 def _local_probe_python() -> str:
@@ -498,7 +559,7 @@ def setup_cookbook_routes() -> APIRouter:
         if not remote_host and getattr(request.state, "local_model_authority", None) is None:
             from routes.shell_routes import _require_admin
             _require_admin(request)
-    _cookbook_state_path = Path(COOKBOOK_STATE_FILE)
+    _cookbook_state_path = _COOKBOOK_STATE_PATH
     _state_get_cache = {"ts": 0.0, "mtime": 0.0, "value": None}
     _tasks_status_cache = {"ts": 0.0, "value": None}
     _tasks_status_inflight = {"task": None}
@@ -3034,6 +3095,39 @@ def setup_cookbook_routes() -> APIRouter:
         except Exception as e:
             return {"ok": False, "error": str(e)[:200]}
 
+    class CancelTaskRequest(BaseModel):
+        session_id: str
+
+    @router.post("/api/cookbook/tasks/cancel")
+    async def cookbook_cancel_task(request: Request, req: CancelTaskRequest):
+        """Record a user cancellation persistently.
+
+        Only the *request* is recorded here. Whether the process actually died
+        is a separate question, answered by the status poller once it observes
+        liveness false and promotes the task to ``stopped``. Until then the task
+        reports ``stopping`` — an honest uncertain outcome, not a claim.
+
+        Idempotent: repeating the call for a task already cancel_requested (or
+        already stopped) changes nothing and reports the same status.
+        """
+        require_admin(request)
+        sid = (req.session_id or "").strip()
+        if not _SESSION_ID_RE.match(sid):
+            raise HTTPException(400, "Invalid session id")
+        result = _set_task_status(sid, CANCEL_REQUESTED, stamp=True)
+        if not result.get("found"):
+            raise HTTPException(404, "Unknown task")
+        # A cached GET would otherwise keep serving the pre-cancel status.
+        _state_get_cache.pop("value", None)
+        logger.info(f"cookbook cancel requested for {sid} (was {result.get('previous')!r})")
+        return {
+            "ok": True,
+            "session_id": sid,
+            "status": CANCEL_REQUESTED,
+            "previous": result.get("previous"),
+            "changed": result.get("changed"),
+        }
+
     # ── Cookbook state persistence (cross-device sync) ──
 
     @router.get("/api/cookbook/state")
@@ -4142,6 +4236,7 @@ def setup_cookbook_routes() -> APIRouter:
                 # status endpoint (3+ minute stalls with ~8 accumulated
                 # stopped tasks). The agent's `list_served_models` call
                 # was blocking the chat stream every time.
+
                 _task_status = (task.get("status") or "").lower()
                 _persisted_serve_ready = (
                     task_type == "serve"
@@ -4176,6 +4271,34 @@ def setup_cookbook_routes() -> APIRouter:
                         except Exception:
                             pass
 
+            # A recorded cancellation is authoritative and durable: it was
+            # written to the state file, so it survives a refresh, an
+            # Odysseus restart and cross-device sync. Never report such a
+            # task as running again. "stopped" is claimed only once liveness
+            # was actually observed false; until then the outcome is
+            # uncertain and reported as "stopping".
+            if (task.get("status") or "").lower() == CANCEL_REQUESTED:
+                _cancel_status = "stopped" if not is_alive else "stopping"
+                if not is_alive:
+                    _set_task_status(session_id, "stopped")
+                    _state_get_cache.pop("value", None)
+                results.append({
+                    "session_id": session_id,
+                    "type": task_type,
+                    "model": model.split("/")[-1] if "/" in model else model,
+                    "status": _cancel_status,
+                    "progress": progress_text[:120],
+                    "phase": "",
+                    "diagnosis": "",
+                    "output_tail": error_aware_output_tail(full_snapshot, _cancel_status),
+                    "exit_code": None,
+                    "cmd": _payload.get("_cmd") or "",
+                    "tps": None,
+                    "reqs": None,
+                    "pct": None,
+                    "remote": remote or "local",
+                })
+                continue
             # Determine status. For the local-Windows detached model the log file
             # persists after the process exits, so a finished download still has a
             # snapshot to classify (DOWNLOAD_OK / exit marker) — evaluate it even
