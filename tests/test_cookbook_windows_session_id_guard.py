@@ -108,3 +108,22 @@ def test_loop_variable_session_ids_are_guarded():
     source = _source()
     assert "_tmuxCmd(t, `has-session -t ${t.sessionId}`)" not in source
     assert "_tmuxCmd(t, `has-session -t ${_safeSessionId(t)}`)" in source
+
+
+def test_stop_path_verifies_the_recorded_process_identity():
+    """A recycled pid must not be signalled.
+
+    The stop command reads <session>.pid.token (written at launch by
+    routes/cookbook_routes.py) and compares the live process start time against
+    it. Verified live on this host: matching token -> stops, foreign token ->
+    does not stop, missing token -> legacy behaviour (stops).
+    """
+    source = _source()
+    assert "function _winPidStopTreePs(sid, dirExpr)" in source
+    assert ".pid.token" in source
+    assert "[datetime]::FromFileTimeUtc([uint64]$matches[1])" in source
+    assert "$proc.StartTime.ToUniversalTime() -ne" in source
+    # The guard runs BEFORE the tree kill, and a mismatch exits without signalling.
+    guard = source.index("[datetime]::FromFileTimeUtc([uint64]$matches[1])")
+    kill = source.index("Stop-Tree ([int]$p) }; ", guard)
+    assert "exit 0 } " in source[guard:kill]

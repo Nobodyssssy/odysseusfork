@@ -1072,15 +1072,34 @@ function _winPowerShellCmd(task, ps) {
   return `ssh ${_sshPrefix(_getPort(task))}${host} ${_shQuote(command)}`;
 }
 
+// Stop a recorded PID only when it is still the process that was launched.
+// Windows recycles pids, so a stale <session>.pid can come to name an
+// unrelated process; the launch path records its creation time next to it
+// (<session>.pid.token, written by routes/cookbook_routes.py) and this guard
+// compares it before signalling. A missing token means a task launched before
+// identities existed — fall back to the bare pid, as before.
+function _winPidStopTreePs(sid, dirExpr) {
+  const stopTree = `function Stop-Tree([int]$Id) { Get-CimInstance Win32_Process -Filter ('ParentProcessId = ' + $Id) -ErrorAction SilentlyContinue | ForEach-Object { Stop-Tree ([int]$_.ProcessId) }; Stop-Process -Id $Id -Force -ErrorAction SilentlyContinue }`;
+  return `${stopTree}; `
+    + `$p = Get-Content (Join-Path ${dirExpr} '${sid}.pid') -ErrorAction SilentlyContinue; `
+    + `if ($p -match '^\\d+$') { `
+    + `$t = Get-Content (Join-Path ${dirExpr} '${sid}.pid.token') -ErrorAction SilentlyContinue; `
+    + `if ($t -match '^win32:(\\d+)$') { `
+    + `$proc = Get-Process -Id ([int]$p) -ErrorAction SilentlyContinue; `
+    + `if (-not $proc) { exit 0 }; `
+    + `if ($proc.StartTime.ToUniversalTime() -ne [datetime]::FromFileTimeUtc([uint64]$matches[1]).ToUniversalTime()) { exit 0 } `
+    + `}; Stop-Tree ([int]$p) }; `;
+}
+
 function _winSessionStopTreePs(task) {
   const host = _taskRemoteHost(task);
   const sd = host ? '$env:TEMP\\odysseus-sessions' : '$env:TEMP\\odysseus-tmux';
   const sid = _safeSessionId(task);
   if (!sid) return '';
-  const stopTree = `function Stop-Tree([int]$Id) { Get-CimInstance Win32_Process -Filter ('ParentProcessId = ' + $Id) -ErrorAction SilentlyContinue | ForEach-Object { Stop-Tree ([int]$_.ProcessId) }; Stop-Process -Id $Id -Force -ErrorAction SilentlyContinue }`;
+  const stop = _winPidStopTreePs(sid, sd);
   return host
-    ? `${stopTree}; $p = Get-Content '${sd}\\${sid}.pid' -ErrorAction SilentlyContinue; if ($p -match '^\\d+$') { Stop-Tree ([int]$p) }; Remove-Item '${sd}\\${sid}.*' -Force -ErrorAction SilentlyContinue`
-    : `${stopTree}; $p = Get-Content (Join-Path $env:TEMP 'odysseus-tmux\\${sid}.pid') -ErrorAction SilentlyContinue; if ($p -match '^\\d+$') { Stop-Tree ([int]$p) }; Remove-Item (Join-Path $env:TEMP 'odysseus-tmux\\${sid}.*') -Force -ErrorAction SilentlyContinue`;
+    ? `${stop}Remove-Item '${sd}\\${sid}.*' -Force -ErrorAction SilentlyContinue`
+    : `${stop}Remove-Item (Join-Path $env:TEMP 'odysseus-tmux\\${sid}.*') -Force -ErrorAction SilentlyContinue`;
 }
 
 export function _tmuxGracefulKill(task) {

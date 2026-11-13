@@ -78,6 +78,51 @@ _HF_TOKEN_STATUS_SNIPPET = (
 )
 
 
+def _record_local_pid_identity(session_id: str, pid: int) -> None:
+    """Record the process identity behind a detached local-Windows PID.
+
+    A pid alone is not an identity: Windows recycles pids, so a stale
+    ``<session>.pid`` can come to name an unrelated process after the real one
+    exits. The status poller would then report the task as running forever and a
+    stop would signal a bystander. :func:`src.process_ownership.start_token`
+    captures the process creation time; :func:`verify` compares it later.
+    Best-effort: a host that cannot answer simply records nothing.
+    """
+    try:
+        from src.process_ownership import start_token
+
+        token = start_token(pid)
+    except Exception:
+        return
+    if not token:
+        return
+    try:
+        (TMUX_LOG_DIR / f"{session_id}.pid.token").write_text(token, encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _local_pid_is_owned(pid, session_id: str) -> bool:
+    """True only when ``pid`` is alive AND still the process we launched.
+
+    A task launched before an identity was recorded has no token file; that is
+    not evidence of death, so it keeps the bare liveness probe rather than being
+    hidden. A recorded token that no longer matches means the pid was recycled:
+    the task is not running, and it must not be reported as such.
+    """
+    if not pid_alive(pid):
+        return False
+    try:
+        token = (TMUX_LOG_DIR / f"{session_id}.pid.token").read_text(encoding="utf-8").strip()
+    except OSError:
+        return True
+    if not token:
+        return True
+    from src.process_ownership import OWNED, verify
+
+    return verify(pid, token) == OWNED
+
+
 def _local_probe_python() -> str:
     """Interpreter for the in-process cache probes (never a bare ``python3``).
 
@@ -942,6 +987,7 @@ def setup_cookbook_routes() -> APIRouter:
         # Publish a valid Win32 ancestor first. The Git Bash runner may then
         # replace it with its own Win32 pid, but never before this fallback exists.
         pid_path.write_text(str(proc.pid), encoding="utf-8")
+        _record_local_pid_identity(session_id, proc.pid)
         if pid_ready_path is not None:
             try:
                 pid_ready_path.touch()
@@ -4079,7 +4125,7 @@ def setup_cookbook_routes() -> APIRouter:
                     task_pid = int(pid_path.read_text(encoding="utf-8").strip())
                 except Exception:
                     task_pid = None
-                is_alive = pid_alive(task_pid)
+                is_alive = _local_pid_is_owned(task_pid, session_id)
                 try:
                     if log_path.exists():
                         full_snapshot = log_path.read_text(
