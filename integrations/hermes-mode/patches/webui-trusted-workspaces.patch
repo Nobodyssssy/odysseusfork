@@ -1,8 +1,120 @@
 diff --git a/api/routes.py b/api/routes.py
-index 017650278..bbc5d3c62 100644
+index 017650278..47b39bcb1 100644
 --- a/api/routes.py
 +++ b/api/routes.py
-@@ -18269,6 +18269,18 @@ def handle_get(handler, parsed) -> bool:
+@@ -11654,6 +11654,35 @@ def _tool_result_matches_call_ids(message, call_ids) -> bool:
+     return bool(tid) and str(tid) in call_ids
+ 
+ 
++# Provider replay payloads (encrypted/structured reasoning, Codex items) are
++# stored for model-context replay only; no transcript renderer reads them. On a
++# long agent session they were ~half of the /api/session body (12 of 23 MB on
++# the 3,191-message reproduction), so the browser parsed, redacted and retained
++# data it never displays. The stored session and model context keep them.
++_DISPLAY_DROPPED_REPLAY_FIELDS = (
++    "reasoning_details",
++    "codex_reasoning_items",
++    "codex_message_items",
++)
++
++
++def _drop_provider_replay_blobs_for_display(raw):
++    """Return ``raw`` with replay-only message blobs omitted (copy, no mutation)."""
++    messages = raw.get("messages") if isinstance(raw, dict) else None
++    if not isinstance(messages, list) or not messages:
++        return raw
++    slimmed = []
++    changed = False
++    for message in messages:
++        if isinstance(message, dict) and any(f in message for f in _DISPLAY_DROPPED_REPLAY_FIELDS):
++            message = {k: v for k, v in message.items() if k not in _DISPLAY_DROPPED_REPLAY_FIELDS}
++            changed = True
++        slimmed.append(message)
++    if not changed:
++        return raw
++    return {**raw, "messages": slimmed}
++
++
+ def _message_window_for_display(messages, msg_limit=None, msg_before=None, expand_renderable=False) -> tuple[list, int]:
+     """Return a paginated message window plus its offset in ``messages``.
+ 
+@@ -11813,10 +11842,21 @@ _LIMITED_TOOL_CONTENT_NOTICE = (
+     "\n\n[Tool output truncated in paginated session response; "
+     "load the full transcript to inspect the complete result.]"
+ )
++# ``?msg_limit=all`` is the full-transcript escape hatch (outline jump, jump-to-start).
++# It asks for every ROW, not for unbounded per-row content, so the same hidden
++# tool-result bound applies — only the notice differs, because "load the full
++# transcript" is exactly what the caller just asked for and must not be named
++# as the remedy. Without this, a single multi-megabyte tool output makes the
++# full-history load (the one request the frontend gives a 120s timeout) ship
++# the whole payload while every paginated window stays bounded.
++_FULL_TOOL_CONTENT_NOTICE = (
++    "\n\n[Tool output truncated in this response; "
++    "export the session to inspect the complete result.]"
++)
+ 
+ 
+-def _tool_message_for_limited_payload(message):
+-    """Return a bounded copy of large hidden tool-result rows for paginated loads."""
++def _tool_message_for_bounded_payload(message, notice: str):
++    """Return a bounded copy of a large hidden tool-result row, or ``message`` unchanged."""
+     if not isinstance(message, dict) or str(message.get("role") or "").lower() != "tool":
+         return message
+     content = message.get("content")
+@@ -11832,7 +11872,7 @@ def _tool_message_for_limited_payload(message):
+     if len(text) <= _LIMITED_TOOL_CONTENT_MAX_CHARS:
+         return message
+     clipped = dict(message)
+-    preview = text[:_LIMITED_TOOL_CONTENT_MAX_CHARS] + _LIMITED_TOOL_CONTENT_NOTICE
++    preview = text[:_LIMITED_TOOL_CONTENT_MAX_CHARS] + notice
+     if isinstance(content, str):
+         clipped["content"] = preview
+     elif isinstance(content, list):
+@@ -11846,6 +11886,22 @@ def _tool_message_for_limited_payload(message):
+     return clipped
+ 
+ 
++def _tool_message_for_limited_payload(message):
++    """Return a bounded copy of large hidden tool-result rows for paginated loads."""
++    return _tool_message_for_bounded_payload(message, _LIMITED_TOOL_CONTENT_NOTICE)
++
++
++def _messages_for_full_payload_bounded(messages) -> list:
++    """Bound hidden tool-result payloads on a ``msg_limit=all`` full-transcript response.
++
++    Row-for-row identical to the input (the escape hatch's contract is "every
++    row"); only oversized tool-result CONTENT is clipped, and the row keeps
++    ``_content_truncated`` / ``_content_original_chars`` so a caller can tell
++    the result was elided rather than genuinely short.
++    """
++    return [_tool_message_for_bounded_payload(msg, _FULL_TOOL_CONTENT_NOTICE) for msg in list(messages or [])]
++
++
+ def _messages_for_limited_payload(messages) -> list:
+     """Bound hidden tool-result payloads before sending a msg_limit response."""
+     return [_tool_message_for_limited_payload(msg) for msg in list(messages or [])]
+@@ -17057,6 +17113,11 @@ def _handle_session_get(handler, parsed) -> bool:
+             )
+             if msg_limit is not None:
+                 _truncated_msgs = _messages_for_limited_payload(_truncated_msgs)
++            elif _msg_limit_explicit_all:
++                # Full-transcript escape hatch: every row is still returned, but a
++                # single oversized hidden tool result must not make the one request
++                # the frontend allows 120s for ship an unbounded payload.
++                _truncated_msgs = _messages_for_full_payload_bounded(_truncated_msgs)
+             _truncated_msgs = _hydrate_anchor_activity_scenes(
+                 _truncated_msgs,
+                 getattr(s, "anchor_activity_scenes", None),
+@@ -17297,6 +17358,7 @@ def _handle_session_get(handler, parsed) -> bool:
+             )
+             if revision:
+                 raw["regeneration_revision"] = revision
++        raw = _drop_provider_replay_blobs_for_display(raw)
+         redact = public_session_projection(raw)
+         _t5 = _time.monotonic()
+         if _diag: _diag.stage("t5_after_redact")
+@@ -18269,6 +18331,18 @@ def handle_get(handler, parsed) -> bool:
      if parsed.path == "/api/session/export":
          return _handle_session_export(handler, parsed)
  
@@ -21,7 +133,7 @@ index 017650278..bbc5d3c62 100644
      if parsed.path == "/api/workspaces":
          from api.profiles import get_active_profile_name
          active_profile = get_active_profile_name()
-@@ -21531,6 +21543,29 @@ def handle_post(handler, parsed) -> bool:
+@@ -21531,6 +21605,29 @@ def handle_post(handler, parsed) -> bool:
      if parsed.path == "/api/file/open-vscode":
          return _handle_file_open_vscode(handler, body)
  
@@ -760,11 +872,162 @@ index adff2c140..b8e17e56a 100644
      try:
          from api.models import _active_state_db_path
          from api.session_recovery import recover_all_sessions_on_startup
+diff --git a/static/diagnostics.js b/static/diagnostics.js
+new file mode 100644
+index 000000000..282851772
+--- /dev/null
++++ b/static/diagnostics.js
+@@ -0,0 +1,138 @@
++/* Lightweight local diagnostics and load-failure recovery.
++ *
++ * No network, no background timers. A small ring buffer of redacted client errors lives in
++ * localStorage so a crash that reloads the page can still be explained afterwards.
++ * Each failure gets a short event id the user can quote; "Copy diagnostics" copies the buffer.
++ */
++(function(){
++  'use strict';
++  var KEY='hermes-webui-diag-v1';
++  var MAX_EVENTS=40;          // oldest dropped first
++  var MAX_FIELD=400;          // characters kept per text field
++  var MAX_BYTES=24000;        // hard cap on the stored buffer
++
++  var SECRET_PATTERNS=[
++    [/(authorization|cookie|set-cookie)\s*[:=]\s*[^\r\n,;]+/ig,'$1=[redacted]'],
++    [/\bBearer\s+[A-Za-z0-9._~+\/=-]{8,}/g,'Bearer [redacted]'],
++    [/\b(sk|pk|rk|ghp|gho|xox[abps])[-_][A-Za-z0-9_-]{12,}/g,'[redacted-key]'],
++    [/([?&](?:token|key|api_key|apikey|access_token|password|csrf)=)[^&\s]+/ig,'$1[redacted]'],
++    [/\b(api[_-]?key|token|secret|password)["']?\s*[:=]\s*["']?[^\s"',}]{6,}/ig,'$1=[redacted]']
++  ];
++
++  function redact(text){
++    var s=String(text==null?'':text);
++    for(var i=0;i<SECRET_PATTERNS.length;i++) s=s.replace(SECRET_PATTERNS[i][0],SECRET_PATTERNS[i][1]);
++    return s.length>MAX_FIELD?s.slice(0,MAX_FIELD)+'…':s;
++  }
++
++  function eventId(){
++    var a='';
++    try{
++      var b=new Uint8Array(4); crypto.getRandomValues(b);
++      for(var i=0;i<b.length;i++) a+=('0'+b[i].toString(16)).slice(-2);
++    }catch(_){ a=Math.random().toString(16).slice(2,10); }
++    return 'E-'+a;
++  }
++
++  function read(){
++    try{ var v=JSON.parse(localStorage.getItem(KEY)||'[]'); return Array.isArray(v)?v:[]; }catch(_){ return []; }
++  }
++
++  function write(events){
++    while(events.length>MAX_EVENTS) events.shift();
++    var text=JSON.stringify(events);
++    while(text.length>MAX_BYTES && events.length>1){ events.shift(); text=JSON.stringify(events); }
++    try{ localStorage.setItem(KEY,text); }catch(_){ /* storage full or blocked: diagnostics stay best-effort */ }
++  }
++
++  function record(category,detail,extra){
++    var id=eventId();
++    var entry={id:id,t:new Date().toISOString(),category:String(category||'unknown'),detail:redact(detail)};
++    if(extra&&typeof extra==='object'){
++      var keep={};
++      Object.keys(extra).slice(0,8).forEach(function(k){
++        var v=extra[k];
++        keep[k]=(typeof v==='number'||typeof v==='boolean')?v:redact(v);
++      });
++      entry.extra=keep;
++    }
++    var events=read(); events.push(entry); write(events);
++    return id;
++  }
++
++  /* Maps a failed request to a short category plus what the user can do. Never retries anything itself. */
++  function classify(err){
++    var status=err&&typeof err.status==='number'?err.status:0;
++    var text=String((err&&err.message)||err||'');
++    if(status===401) return {category:'auth',message:'Your sign-in expired',action:'Sign in again, then retry.'};
++    if(status===403) return {category:'forbidden',message:'This session is not available to the current profile',action:'Switch profile or choose another session.'};
++    if(status===404) return {category:'not_found',message:'This session no longer exists',action:'Choose another session.'};
++    if(status===413||/payload too large/i.test(text)) return {category:'too_large',message:'This conversation is too large to load in one piece',action:'Retry; if it keeps failing, start a continuation.'};
++    if(status===429) return {category:'rate_limited',message:'The server is busy',action:'Wait a moment, then retry.'};
++    if(status>=500) return {category:'server_error',message:'The server failed while loading this session',action:'Retry. Nothing was lost; the session is stored on disk.'};
++    if(/abort|timeout|timed out/i.test(text)) return {category:'timeout',message:'Loading took too long',action:'Retry. Long sessions can take a few seconds.'};
++    return {category:'connection',message:'Connection to the server was lost',action:'Check that the server is running, then retry.'};
++  }
++
++  function copyText(text){
++    try{
++      if(navigator.clipboard&&navigator.clipboard.writeText) return navigator.clipboard.writeText(text);
++    }catch(_){ }
++    return Promise.reject(new Error('clipboard unavailable'));
++  }
++
++  function snapshot(){
++    var nav=(typeof navigator!=='undefined')?navigator:{};
++    return JSON.stringify({
++      version:window.__HERMES_WEBUI_BUNDLE_VERSION__||'',
++      userAgent:redact(nav.userAgent||''),
++      page:redact(location.pathname),
++      events:read()
++    },null,2);
++  }
++
++  /* Replaces `container` content with a recovery card. All text is set with textContent (no HTML from errors). */
++  function renderFailure(container,opts){
++    if(!container) return null;
++    opts=opts||{};
++    var info=classify(opts.error);
++    var id=record(info.category,(opts.error&&opts.error.message)||String(opts.error||''),{
++      what:opts.what||'load',session:opts.sessionId?String(opts.sessionId).slice(0,12):'',status:(opts.error&&opts.error.status)||0});
++
++    var wrap=document.createElement('div');
++    wrap.className='load-failure-card';
++    wrap.setAttribute('role','alert');
++    wrap.style.cssText='display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;';
++
++    function line(text,style){ var d=document.createElement('div'); d.textContent=text; if(style) d.style.cssText=style; wrap.appendChild(d); return d; }
++    line((opts.title||'Could not load this conversation')+' — '+info.message,'font-weight:600;color:var(--text);');
++    line(info.action);
++    line('Your messages are stored on disk and were not changed. Reference '+id,'font-size:12px;opacity:.8;');
++
++    var row=document.createElement('div'); row.style.cssText='display:flex;gap:8px;';
++    function button(label,handler){
++      var b=document.createElement('button'); b.type='button'; b.textContent=label; b.className='btn';
++      b.style.cssText='padding:6px 14px;cursor:pointer;';
++      b.addEventListener('click',handler); row.appendChild(b); return b;
++    }
++    if(typeof opts.retry==='function'){
++      var retry=button('Retry',function(){ retry.disabled=true; retry.textContent='Retrying…'; try{ opts.retry(); }catch(_){ retry.disabled=false; retry.textContent='Retry'; } });
++    }
++    var copy=button('Copy diagnostics',function(){
++      copyText(snapshot()).then(function(){ copy.textContent='Copied'; },function(){ copy.textContent='Copy failed'; });
++    });
++    wrap.appendChild(row);
++    container.replaceChildren(wrap);
++    return id;
++  }
++
++  /* Global handlers record, never swallow: the browser still reports the error in its console. */
++  window.addEventListener('error',function(ev){
++    record('js_error',(ev&&ev.message)||'error',{source:ev&&ev.filename?String(ev.filename).split('/').pop():'',line:(ev&&ev.lineno)||0});
++  });
++  window.addEventListener('unhandledrejection',function(ev){
++    var r=ev&&ev.reason; record('unhandled_rejection',(r&&r.message)||String(r||''));
++  });
++
++  window.HermesDiag={record:record,classify:classify,renderFailure:renderFailure,events:read,snapshot:snapshot,redact:redact,clear:function(){ try{ localStorage.removeItem(KEY); }catch(_){ } }};
++})();
 diff --git a/static/index.html b/static/index.html
-index 902b2843e..37a764982 100644
+index 902b2843e..20214056b 100644
 --- a/static/index.html
 +++ b/static/index.html
-@@ -1854,6 +1854,7 @@
+@@ -1848,12 +1848,14 @@
+   </div>
+ </div>
+ <div class="toast" id="toast"></div>
++<script src="static/diagnostics.js?v=__WEBUI_VERSION__" defer></script>
+ <script src="static/i18n.js?v=__WEBUI_VERSION__" defer></script>
+ <script src="static/icons.js?v=__WEBUI_VERSION__" defer></script>
+ <script src="static/assistant_turn_anchors.js?v=__WEBUI_VERSION__" defer></script>
  <script src="static/a11y-helpers.js?v=__WEBUI_VERSION__" defer></script>
  <script src="static/ui.js?v=__WEBUI_VERSION__" defer></script>
  <script src="static/workspace.js?v=__WEBUI_VERSION__" defer></script>
@@ -772,6 +1035,60 @@ index 902b2843e..37a764982 100644
  <script src="static/terminal.js?v=__WEBUI_VERSION__" defer></script>
  <script src="static/sessions.js?v=__WEBUI_VERSION__" defer></script>
  <script src="static/commands.js?v=__WEBUI_VERSION__" defer></script>
+diff --git a/static/sessions.js b/static/sessions.js
+index 93e4ba8e4..f7c28957f 100644
+--- a/static/sessions.js
++++ b/static/sessions.js
+@@ -3074,7 +3074,11 @@ async function loadSession(sid){
+         // Non-404, non-401 failures (400, 403, 500, network) do not establish
+         // that the session is gone. Preserve route and localStorage so boot can
+         // retry; 401 returns undefined and is handled below.
+-        _msgInner.innerHTML='<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Failed to load session. Try refreshing or switching sessions.</div>';
++        if(window.HermesDiag){
++          HermesDiag.renderFailure(_msgInner,{error:e,sessionId:sid,what:'session',title:'Could not load this session',retry:()=>loadSession(sid,{...opts,force:true})});
++        }else{
++          _msgInner.innerHTML='<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Failed to load session. Try refreshing or switching sessions.</div>';
++        }
+         if(typeof showToast==='function') showToast('Failed to load session',3000,'error');
+       }
+     }
+@@ -3438,7 +3442,11 @@ async function loadSession(sid){
+       // persist forever with no recovery path.
+       const _msgInner = $('msgInner');
+       if (_msgInner) {
+-        _msgInner.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Failed to load messages. Try switching sessions or refreshing.</div>';
++        if (window.HermesDiag) {
++          HermesDiag.renderFailure(_msgInner, {error: e, sessionId: sid, what: 'messages', title: 'Could not load the messages', retry: () => loadSession(sid, {...opts, force: true})});
++        } else {
++          _msgInner.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Failed to load messages. Try switching sessions or refreshing.</div>';
++        }
+       }
+       if (typeof showToast === 'function') showToast('Failed to load conversation messages', 3000, 'error');
+       if (_isCurrentLoad()) _loadingSessionId = null;
+@@ -5506,6 +5514,11 @@ async function _loadOlderMessages() {
+     _scrollPinned = false;
+   } catch(e) {
+     console.warn('_loadOlderMessages failed:', e);
++    // Silent before: the user scrolled to the top and nothing happened. Name it and offer the same action again.
++    if (window.HermesDiag && startGeneration === _messagesGeneration && S.session && S.session.session_id === sid) {
++      const diagId = HermesDiag.record(HermesDiag.classify(e).category, (e && e.message) || String(e), {what: 'older', session: String(sid).slice(0, 12)});
++      if (typeof showToast === 'function') showToast(`Couldn't load earlier messages (${diagId}). Scroll up again to retry.`, 4000, 'error');
++    }
+   } finally {
+     // Always clear the loading lock. If the user switched sessions while
+     // this request was in flight, loadSession() already set _loadingOlder=false
+diff --git a/static/sw.js b/static/sw.js
+index 3d3821b49..fd53dcbfb 100644
+--- a/static/sw.js
++++ b/static/sw.js
+@@ -27,6 +27,7 @@ const SHELL_ASSETS = [
+   './static/boot.js' + VQ,
+   './static/assistant_turn_anchors.js' + VQ,
+   './static/a11y-helpers.js' + VQ,
++  './static/diagnostics.js' + VQ,
+   './static/ui.js' + VQ,
+   './static/messages.js' + VQ,
+   './static/sessions.js' + VQ,
 diff --git a/static/trusted-workspaces.js b/static/trusted-workspaces.js
 new file mode 100644
 index 000000000..8e614a6c6
@@ -1078,6 +1395,294 @@ index 000000000..8e614a6c6
 +    if (pane) new MutationObserver(() => { if (pane.classList.contains('active')) renderSettings(); }).observe(pane, { attributes: true, attributeFilter: ['class'] });
 +  });
 +})();
+diff --git a/static/ui.js b/static/ui.js
+index b8cd91dce..f6f4a5abf 100644
+--- a/static/ui.js
++++ b/static/ui.js
+@@ -562,6 +562,8 @@ async function startCompressionRecovery(btn){
+ const MESSAGE_RENDER_WINDOW_DEFAULT=50;
+ const MESSAGE_VIRTUAL_THRESHOLD_ROWS=80;
+ const MESSAGE_VIRTUAL_BUFFER_PX=900;
++const MESSAGE_VIRTUAL_COLLAPSED_ROW_PX=1;
++const MESSAGE_VIRTUAL_FORCE_ROWS=400;
+ const MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHTS={
+   user:120,
+   process_wakeup:96,
+@@ -1140,6 +1142,13 @@ function _messageVirtualRoleForEntry(entry){
+   }
+   return 'default';
+ }
++// Safety net for huge transcripts: with the opt-in off, "load earlier" grows the DOM without bound (measured: 556 rows = 22k nodes,
++// ~40 nodes/row, which freezes Firefox on multi-thousand-message sessions). Past this many rows the window applies even when the user
++// has not opted in; smaller transcripts keep the proven full-render path. window._virtualizeForceRows overrides it.
++function _messageVirtualForceRows(){
++  const override=Number(typeof window!=='undefined'&&window._virtualizeForceRows);
++  return Math.max(MESSAGE_VIRTUAL_THRESHOLD_ROWS, override>0?override:MESSAGE_VIRTUAL_FORCE_ROWS);
++}
+ function _currentMessageVirtualWindow(visWithIdx, keepTailCount){
+   _syncMessageVirtualHeightCache(visWithIdx);
+   const container=$('messages');
+@@ -1147,7 +1156,7 @@ function _currentMessageVirtualWindow(visWithIdx, keepTailCount){
+   // render the full transcript (no windowing). Mirrors the <=threshold path so
+   // every downstream consumer (render, anchor, prepend-delta) treats it as a
+   // plain non-virtualized list.
+-  if(typeof window!=='undefined' && window._virtualizeTranscript===false){
++  if(typeof window!=='undefined' && window._virtualizeTranscript===false && visWithIdx.length<=_messageVirtualForceRows()){
+     const total=visWithIdx.length;
+     const tailStart=Math.max(0, total-Math.max(0, Number(keepTailCount)||0));
+     return {virtualized:false,start:0,end:total,topPad:0,bottomPad:0,total,tailStart};
+@@ -1899,11 +1908,18 @@ function _updateMessageVirtualMeasurements(renderVisWithIdx, renderVisibleIdxs,
+   // deferred contain-intrinsic-size values. All the reads therefore share a
+   // single layout instead of forcing one per row.
+   const deferredWrites=[];
++  const hasMountedRows=!!inner.querySelector('[data-msg-idx]');
+   for(let vi=0;vi<renderVisWithIdx.length;vi++){
+     const entry=renderVisWithIdx[vi];
+     if(!entry) continue;
+-    const totalHeight=_measureMessageVirtualRow(inner, entry, deferredWrites);
+-    if(totalHeight<=0) continue;
++    let totalHeight=_measureMessageVirtualRow(inner, entry, deferredWrites);
++    if(totalHeight<=0){
++      // A mounted entry that lays out to 0px (hidden worklog-source row) or has no row of its own (a tool message folded into the
++      // assistant row above it) really occupies ~nothing. Skipping it left the flat role prior (up to 400px) in the pad estimate,
++      // inflating scrollHeight ~3.5x and making it jump as rows were measured. Record it as collapsed instead.
++      if(!hasMountedRows) continue;
++      totalHeight=MESSAGE_VIRTUAL_COLLAPSED_ROW_PX;
++    }
+     const visibleIdx=Number(renderVisibleIdxs&&renderVisibleIdxs[vi]);
+     if(!Number.isFinite(visibleIdx)) continue;
+     if(Math.abs((Number(_messageVirtualHeightCache[visibleIdx])||0)-totalHeight)>1){
+diff --git a/tests/test_diagnostics_recovery.py b/tests/test_diagnostics_recovery.py
+new file mode 100644
+index 000000000..a3d21d0e3
+--- /dev/null
++++ b/tests/test_diagnostics_recovery.py
+@@ -0,0 +1,65 @@
++"""Failed-load recovery and local diagnostics (static/diagnostics.js) wiring and behavior."""
++import json
++import pathlib
++import shutil
++import subprocess
++
++import pytest
++
++STATIC = pathlib.Path(__file__).resolve().parent.parent / "static"
++DIAG = STATIC / "diagnostics.js"
++NODE = shutil.which("node")
++
++HARNESS = r"""
++const fs = require('fs');
++const store = {};
++global.localStorage = {getItem: k => (k in store ? store[k] : null), setItem: (k, v) => { store[k] = String(v); }, removeItem: k => { delete store[k]; }};
++global.navigator = {userAgent: 'test'};
++global.location = {pathname: '/'};
++const listeners = {};
++global.window = global;
++global.addEventListener = (n, f) => { listeners[n] = f; };
++global.crypto = require('crypto').webcrypto;
++eval(fs.readFileSync(process.argv[2], 'utf8'));
++const D = window.HermesDiag;
++const out = {};
++out.redacted = D.redact('Authorization: Bearer abcdefghijklmnop and sk-abcdefghijklmnopqrstuv ?token=hunter22hunter');
++for (let i = 0; i < 200; i++) D.record('server_error', 'x'.repeat(2000) + i);
++out.count = D.events().length;
++out.bytes = store['hermes-webui-diag-v1'].length;
++out.fieldLen = D.events()[0].detail.length;
++out.id = /^E-[0-9a-f]{8}$/.test(D.events()[0].id);
++out.cls = [D.classify({status: 500}).category, D.classify({status: 404}).category, D.classify(new Error('Failed to fetch')).category, D.classify({message: 'request timed out'}).category, D.classify({status: 429}).category];
++listeners.error({message: 'boom token=abcdefabcdef', filename: 'http://h/static/ui.js', lineno: 9});
++out.lastCat = D.events().slice(-1)[0].category;
++out.lastDetail = D.events().slice(-1)[0].detail;
++console.log(JSON.stringify(out));
++"""
++
++
++@pytest.mark.skipif(NODE is None, reason="node not installed")
++def test_diagnostics_redact_bound_classify_and_record_global_errors(tmp_path):
++    harness = tmp_path / "h.cjs"
++    harness.write_text(HARNESS, encoding="utf-8")
++    result = subprocess.run([NODE, str(harness), str(DIAG)], capture_output=True, text=True, timeout=60)
++    assert result.returncode == 0, result.stderr
++    out = json.loads(result.stdout.strip().splitlines()[-1])
++    assert "abcdefghijklmnop" not in out["redacted"] and "hunter22hunter" not in out["redacted"]
++    assert "sk-abcdefghijklmnopqrstuv" not in out["redacted"]
++    assert out["count"] <= 40 and out["bytes"] <= 24000
++    assert out["fieldLen"] <= 401
++    assert out["id"] is True
++    assert out["cls"] == ["server_error", "not_found", "connection", "timeout", "rate_limited"]
++    assert out["lastCat"] == "js_error" and "abcdefabcdef" not in out["lastDetail"]
++
++
++def test_diagnostics_is_loaded_precached_and_used_by_failed_loads():
++    index = (STATIC / "index.html").read_text(encoding="utf-8")
++    sw = (STATIC / "sw.js").read_text(encoding="utf-8")
++    sessions = (STATIC / "sessions.js").read_text(encoding="utf-8")
++    assert index.index('static/diagnostics.js?v=__WEBUI_VERSION__') < index.index('static/sessions.js?v=__WEBUI_VERSION__')
++    assert "'./static/diagnostics.js' + VQ" in sw
++    assert sessions.count("HermesDiag.renderFailure(") == 2          # metadata load and message load both get Retry
++    assert "Couldn't load earlier messages" in sessions               # scroll-back failure is no longer silent
++    src = DIAG.read_text(encoding="utf-8")
++    assert "fetch(" not in src and "setInterval" not in src           # local only, no background work
+diff --git a/tests/test_display_drops_provider_replay_blobs.py b/tests/test_display_drops_provider_replay_blobs.py
+new file mode 100644
+index 000000000..5eed80463
+--- /dev/null
++++ b/tests/test_display_drops_provider_replay_blobs.py
+@@ -0,0 +1,19 @@
++from api.routes import _drop_provider_replay_blobs_for_display
++
++
++def test_replay_blobs_dropped_from_display_copy_only():
++    raw = {"session_id": "s", "messages": [
++        {"role": "assistant", "content": "hi", "reasoning_details": [{"x": 1}],
++         "codex_reasoning_items": [1], "codex_message_items": [2], "reasoning": "kept"},
++        {"role": "user", "content": "q"},
++    ]}
++    out = _drop_provider_replay_blobs_for_display(raw)
++    assert out["messages"][0] == {"role": "assistant", "content": "hi", "reasoning": "kept"}
++    assert out["messages"][1] is raw["messages"][1]
++    assert "reasoning_details" in raw["messages"][0]
++
++
++def test_untouched_when_nothing_to_drop():
++    raw = {"messages": [{"role": "user", "content": "q"}]}
++    assert _drop_provider_replay_blobs_for_display(raw) is raw
++    assert _drop_provider_replay_blobs_for_display({"messages": []}) == {"messages": []}
+diff --git a/tests/test_issue500_message_list_virtualization.py b/tests/test_issue500_message_list_virtualization.py
+index b2abca774..2796f146e 100644
+--- a/tests/test_issue500_message_list_virtualization.py
++++ b/tests/test_issue500_message_list_virtualization.py
+@@ -804,6 +804,7 @@ function _messageVirtualDefaultHeightForRole(role){
+ }
+ const MESSAGE_VIRTUAL_THRESHOLD_ROWS = 80;
+ const MESSAGE_VIRTUAL_BUFFER_PX = 900;
++const MESSAGE_VIRTUAL_FORCE_ROWS = 400;
+ let _messageVirtualHeightCache = [];
+ let _messageVirtualEstimatedRowHeight = 140;
+ function _syncMessageVirtualHeightCache(){ /* no-op for the test */ }
+@@ -811,6 +812,7 @@ function $(id){ return {scrollTop: 5000, clientHeight: 720}; }
+ function _messageVirtualRoleForEntry(){ return 'default'; }
+ const window = {};
+ eval(extractFunc('_messageVirtualWindow'));
++eval(extractFunc('_messageVirtualForceRows'));
+ eval(extractFunc('_currentMessageVirtualWindow'));
+ // 200 visible messages — well over the 80 threshold
+ const visWithIdx = Array.from({length: 200}, (_, i) => ({rawIdx: i}));
+@@ -823,7 +825,10 @@ const on = _currentMessageVirtualWindow(visWithIdx, 50);
+ // UNDEFINED: also virtualizes (opt-out only when explicitly false)
+ delete window._virtualizeTranscript;
+ const undef = _currentMessageVirtualWindow(visWithIdx, 50);
+-console.log(JSON.stringify({off, on, undef}));
++// OFF but huge (above MESSAGE_VIRTUAL_FORCE_ROWS): the safety net virtualizes anyway so the DOM stays bounded
++window._virtualizeTranscript = false;
++const huge = _currentMessageVirtualWindow(Array.from({length: 3000}, (_, i) => ({rawIdx: i})), 50);
++console.log(JSON.stringify({off, on, undef, huge}));
+ """
+     metrics = json.loads(_run_node(source))
+     # OFF → full, non-virtualized window covering every row
+@@ -837,6 +842,9 @@ console.log(JSON.stringify({off, on, undef}));
+     assert metrics["on"]["end"] - metrics["on"]["start"] < 200
+     # UNDEFINED → still virtualizes (opt-out is explicit-false only)
+     assert metrics["undef"]["virtualized"] is True
++    # OFF with 3000 rows -> safety net: windowed, not all 3000 rows mounted
++    assert metrics["huge"]["virtualized"] is True
++    assert metrics["huge"]["end"] - metrics["huge"]["start"] < 200
+ 
+ 
+ def test_virtualize_transcript_gate_present_in_current_window_fn():
+diff --git a/tests/test_issue7591_virtual_scroll_calibration.py b/tests/test_issue7591_virtual_scroll_calibration.py
+index 823e37f11..e016f2014 100644
+--- a/tests/test_issue7591_virtual_scroll_calibration.py
++++ b/tests/test_issue7591_virtual_scroll_calibration.py
+@@ -145,7 +145,7 @@ let _messageVirtualHeightCache = [];
+ let _messageVirtualEstimatedRowHeight = 140;
+ let refreshed = 0;
+ let settled = 0;
+-function $(id){ return id === 'msgInner' ? { } : null; }
++function $(id){ return id === 'msgInner' ? { querySelector: () => ({}) } : null; }
+ function _measureMessageVirtualRow(inner, entry){ return entry.height; }
+ function _messageVirtualRoleForEntry(entry){ return entry.role; }
+ function _scheduleMessageVirtualMeasurementRefresh(){ refreshed++; }
+diff --git a/tests/test_session_tail_payload.py b/tests/test_session_tail_payload.py
+index f1a8a21ca..b616ba725 100644
+--- a/tests/test_session_tail_payload.py
++++ b/tests/test_session_tail_payload.py
+@@ -277,3 +277,75 @@ def test_msg_limit_tail_preserves_list_tool_content_type_when_truncated():
+     assert not isinstance(tool_msg["content"], str)
+     assert tool_msg["content"][0]["type"] == "text"
+     assert "Tool output truncated" in tool_msg["content"][0]["text"]
++
++
++def test_msg_limit_all_bounds_large_hidden_tool_results_without_dropping_rows():
++    huge_tool_output = "x" * 20_000
++    session = _FakeSession([
++        {"role": "user", "content": "question"},
++        {
++            "role": "assistant",
++            "content": "",
++            "tool_calls": [{"id": "call_1", "function": {"name": "vision", "arguments": "{}"}}],
++        },
++        {
++            "role": "tool",
++            "tool_call_id": "call_1",
++            "content": huge_tool_output,
++        },
++        {"role": "assistant", "content": "done"},
++    ])
++
++    payload = _invoke(
++        session,
++        query="session_id=tail_payload_001&messages=1&resolve_model=0&msg_limit=all",
++    )
++
++    # The escape hatch's contract is "every row": bounding content must not
++    # change the row set or the tool_call_id that anchors the card.
++    assert [m["role"] for m in payload["messages"]] == ["user", "assistant", "tool", "assistant"]
++    tool_msg = payload["messages"][2]
++    assert tool_msg["tool_call_id"] == "call_1"
++    assert tool_msg["_content_truncated"] is True
++    assert tool_msg["_content_original_chars"] == len(huge_tool_output)
++    assert len(tool_msg["content"]) < len(huge_tool_output)
++    # The full-transcript notice must not tell the caller to do what it just did.
++    assert "export the session" in tool_msg["content"]
++    assert "load the full transcript" not in tool_msg["content"]
++
++
++def test_msg_limit_all_leaves_small_tool_results_untouched():
++    session = _FakeSession([
++        {"role": "user", "content": "question"},
++        {"role": "tool", "tool_call_id": "call_1", "content": "short result"},
++        {"role": "assistant", "content": "done"},
++    ])
++
++    payload = _invoke(
++        session,
++        query="session_id=tail_payload_001&messages=1&resolve_model=0&msg_limit=all",
++    )
++
++    tool_msg = payload["messages"][1]
++    assert tool_msg["content"] == "short result"
++    assert "_content_truncated" not in tool_msg
++
++
++def test_bare_full_transcript_still_returns_unbounded_tool_content():
++    # The historical bare shape (no msg_limit) is pinned by contract tests and
++    # must keep shipping full content; only the explicit `all` escape hatch is
++    # content-bounded.
++    huge_tool_output = "x" * 20_000
++    session = _FakeSession([
++        {"role": "user", "content": "question"},
++        {"role": "tool", "tool_call_id": "call_1", "content": huge_tool_output},
++        {"role": "assistant", "content": "done"},
++    ])
++
++    payload = _invoke(
++        session,
++        query="session_id=tail_payload_001&messages=1&resolve_model=0",
++    )
++
++    assert payload["messages"][1]["content"] == huge_tool_output
++    assert "_content_truncated" not in payload["messages"][1]
 diff --git a/tests/test_trusted_workspaces_prompts.py b/tests/test_trusted_workspaces_prompts.py
 new file mode 100644
 index 000000000..9d764e7c5
