@@ -78,6 +78,21 @@ _HF_TOKEN_STATUS_SNIPPET = (
 )
 
 
+def _local_probe_python() -> str:
+    """Interpreter for the in-process cache probes (never a bare ``python3``).
+
+    A native Windows virtual environment ships ``python.exe`` and no
+    ``python3.exe``, so the previous hardcoded name made both probes fail
+    closed on Windows: a partial blob was never seen, so an interrupted
+    download was reported as stopped instead of resumable. Prefer the
+    interpreter Odysseus is already running under; fall back to a resolved
+    executable rather than a PATH name that may be the Microsoft Store stub.
+    """
+    if sys.executable:
+        return sys.executable
+    return which_tool("python") or which_tool("python3") or "python"
+
+
 def _windows_local_pid_record_line(pid_path: Path, ready_path: Path) -> str:
     """Build the Git Bash prelude that records a Win32-stoppable PID.
 
@@ -3899,7 +3914,7 @@ def setup_cookbook_routes() -> APIRouter:
             """
             if not repo_id or "/" not in repo_id:
                 return False
-            cmd = ["python3", "-c", HF_CACHE_COMPLETE_PROBE, repo_id, cache_root or ""]
+            cmd = [_local_probe_python(), "-c", HF_CACHE_COMPLETE_PROBE, repo_id, cache_root or ""]
             try:
                 if remote_host:
                     ssh_base = ["ssh"]
@@ -3923,7 +3938,7 @@ def setup_cookbook_routes() -> APIRouter:
             """
             if not repo_id or "/" not in repo_id:
                 return False
-            cmd = ["python3", "-c", HF_CACHE_INCOMPLETE_PROBE, repo_id, cache_root or ""]
+            cmd = [_local_probe_python(), "-c", HF_CACHE_INCOMPLETE_PROBE, repo_id, cache_root or ""]
             try:
                 if remote_host:
                     ssh_base = ["ssh"]
