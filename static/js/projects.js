@@ -88,6 +88,17 @@ function follow(href) {
   link.remove();
 }
 
+// Conversation to return to: ?from=<id> (same id syntax the server accepts for resume), kept for the tab so a reload keeps it. Anything else is dropped;
+// the destination is never a URL, only an id handed to the server's own launch ticket, which validates it again.
+const RETURN_ID = /^[A-Za-z0-9._-]{1,200}$/;
+function returnConversation() {
+  const given = new URLSearchParams(location.search).get('from');
+  if (given !== null) {
+    try { RETURN_ID.test(given) ? sessionStorage.setItem('projects-return', given) : sessionStorage.removeItem('projects-return'); } catch (e) { /* storage unavailable */ }
+  }
+  try { const kept = sessionStorage.getItem('projects-return'); return kept && RETURN_ID.test(kept) ? kept : ''; } catch (e) { return ''; }
+}
+
 async function openProjects(resume) {
   try {
     const response = await fetch('/api/application-modes/projects/launch' + (resume ? '?resume=' + encodeURIComponent(resume) : ''), { method: 'POST', credentials: 'same-origin' });
@@ -98,8 +109,16 @@ async function openProjects(resume) {
       throw new Error('Projects returned an unexpected address; nothing was opened');
     }
     follow(url.href);
-    toast(resume ? 'Opening the conversation in Projects. If it opens on the start page, choose it in the sidebar.' : 'Opened Projects');
+    toast(resume ? 'Opening the conversation in Hermes. If it opens on the start page, choose it in the sidebar.' : 'Opening Hermes');
   } catch (error) { toast(error.message); }
+}
+
+function wireHermesButton() {
+  const button = $('toHermes');
+  if (!button) return;
+  const id = returnConversation();
+  button.title = id ? 'Return to the Hermes conversation you came from (opens in a new tab, signed in)' : 'Open HermesGUI in a new tab (signed in)';
+  button.onclick = () => openProjects(id);
 }
 
 function renderEngines() {
@@ -107,7 +126,6 @@ function renderEngines() {
   $('engines').replaceChildren(...(o ? [
     h('span', { title: 'Managed Hermes gateway (Webapp), from its heartbeat record' }, 'Gateway: ' + (o.gateway_live ? 'running' : 'stopped')),
     h('span', { title: 'Legacy Hermes WebUI port' }, 'WebUI: ' + (o.webui_live ? 'running' : 'stopped')),
-    h('button', { type: 'button', title: 'Signs this browser in to the Hermes Webapp so Resume links work', onclick: () => openProjects() }, 'Open Projects'),
   ] : []));
 }
 
@@ -407,4 +425,5 @@ $('search').addEventListener('input', event => { store.query = event.target.valu
 $('refresh').addEventListener('click', () => load(false, true));
 setInterval(() => { if (!document.hidden) load(false); }, 20000);
 renderFilters();
+wireHermesButton();
 load(true);
