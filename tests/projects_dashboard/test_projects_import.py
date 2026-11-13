@@ -42,8 +42,8 @@ def test_plan_creates_only_what_is_missing_and_says_why_it_skips(tmp_path):
     legacy = imp.legacy_projects(make_state(tmp_path, f))
     existing = [{'name': 'something else', 'primary_path': f['alpha'].upper(), 'folders': []}, {'name': 'beta', 'primary_path': None, 'folders': []}]
     actions = {a['name']: a for a in imp.plan(legacy, existing)}
-    assert actions['Alpha']['action'] == 'skip' and 'owns that folder' in actions['Alpha']['reason']
-    assert actions['Beta']['action'] == 'skip' and 'name exists' in actions['Beta']['reason']
+    assert actions['Alpha']['action'] == 'skip' and 'already belongs' in actions['Alpha']['reason']
+    assert actions['Beta']['action'] == 'skip' and 'already exists' in actions['Beta']['reason']
     assert actions['Gamma']['action'] == 'skip' and actions['Delta']['action'] == 'skip'
     fresh = {a['name']: a for a in imp.plan(legacy, [])}
     assert fresh['Alpha']['action'] == 'create' and fresh['Beta']['action'] == 'create'
@@ -73,3 +73,46 @@ def test_the_tool_has_no_way_to_move_conversations_or_change_grants():
     code = source.split('"""', 2)[2]
     for forbidden in ('session.workspace.move', 'session.cwd', 'set_write_roots', 'write_roots', 'projects.delete', 'projects.archive'):
         assert forbidden not in code
+
+
+def test_ownership_is_by_real_location_nesting_and_archived_projects_count(tmp_path):
+    f = folders(tmp_path)
+    legacy = imp.legacy_projects(make_state(tmp_path, f))
+    parent = str(tmp_path)                                                       # an existing project owning a parent folder already covers alpha and beta
+    actions = {a['name']: a for a in imp.plan(legacy, [{'name': 'Everything', 'primary_path': parent, 'archived': True, 'folders': [{'path': parent}]}])}
+    assert actions['Alpha']['action'] == 'skip' and "'Everything'" in actions['Alpha']['reason'] and '(archived)' in actions['Alpha']['reason']
+    swallow = {a['name']: a for a in imp.plan(legacy, [{'name': 'Inner', 'primary_path': str(Path(f['alpha']) / 'sub'), 'archived': False, 'folders': []}])}
+    assert swallow['Alpha']['action'] == 'skip' and 'would contain' in swallow['Alpha']['reason']
+
+
+def test_two_legacy_projects_on_one_folder_create_only_the_first(tmp_path):
+    f = folders(tmp_path)
+    state = make_state(tmp_path, f)
+    (state / 'projects.json').write_text(json.dumps([{'project_id': 'a1', 'name': 'Alpha'}, {'project_id': 'b2', 'name': 'Twin'}]), encoding='utf-8')
+    (state / 'sessions' / '_index.json').write_text(json.dumps([{'project_id': 'a1', 'workspace': f['alpha']}, {'project_id': 'b2', 'workspace': f['alpha']}]), encoding='utf-8')
+    made = [a['action'] for a in imp.plan(imp.legacy_projects(state), [])]
+    assert made == ['create', 'skip']
+
+
+def test_missing_folder_is_reported_with_what_was_recorded_and_never_guessed(tmp_path):
+    f = folders(tmp_path)
+    actions = {a['name']: a for a in imp.plan(imp.legacy_projects(make_state(tmp_path, f)), [])}
+    assert actions['Gamma']['action'] == 'skip' and 'missing or offline' in actions['Gamma']['reason'] and 'gone' in actions['Gamma']['reason']
+
+
+def test_projects_db_is_read_and_backed_up_without_being_changed(tmp_path):
+    import sqlite3
+    home = tmp_path / 'home'
+    home.mkdir()
+    db = sqlite3.connect(home / 'projects.db')
+    db.executescript("create table projects(id text primary key, slug text, name text, primary_path text, archived integer);"
+                     "create table project_folders(project_id text, path text, is_primary integer);"
+                     "insert into projects values('p1','one','One','C:/x',1); insert into project_folders values('p1','C:/x',1);")
+    db.commit()
+    db.close()
+    before = (home / 'projects.db').read_bytes()
+    existing = imp.existing_from_db(home)
+    assert existing == [{'id': 'p1', 'name': 'One', 'primary_path': 'C:/x', 'archived': True, 'folders': [{'path': 'C:/x'}]}]
+    copy = imp.backup_db(home, tmp_path / 'backups')
+    assert sqlite3.connect(copy).execute('select name from projects').fetchall() == [('One',)]
+    assert (home / 'projects.db').read_bytes() == before and imp.existing_from_db(tmp_path / 'nothing') == [] and imp.backup_db(tmp_path / 'nothing', tmp_path / 'b2') is None

@@ -19,7 +19,17 @@ COLOUR = re.compile(r'#[0-9a-fA-F]{6}')
 
 
 def _key(path):
-    return os.path.normcase(os.path.normpath(str(path))).rstrip('\\/')
+    """Canonical comparison form: real location (junctions and links resolved when the folder is reachable), normalised, case-folded on Windows."""
+    text = str(path)
+    try:
+        text = os.path.realpath(text)
+    except OSError:
+        pass
+    return os.path.normcase(os.path.normpath(text)).rstrip('\\/')
+
+
+def _within(child, parent):
+    return child == parent or child.startswith(parent + os.sep)
 
 
 def _read(path, default):
@@ -52,20 +62,73 @@ def legacy_projects(webui_state):
 
 
 def plan(legacy, existing):
-    """One action per legacy project: create, or skip with the reason. ``existing`` is the gateway's project list (archived ones included)."""
-    paths = {_key(p['primary_path']) for p in existing if p.get('primary_path')} | {_key(f['path']) for p in existing for f in p.get('folders') or []}
-    names = {str(p.get('name', '')).casefold() for p in existing}
+    """One action per legacy project: create, or skip with the reason. ``existing`` is the project list (archived ones included).
+    Ownership is by real location: an equal folder, a folder inside an existing project's folder, or a folder that would swallow an existing one all skip.
+    Re-running after an apply therefore plans nothing."""
+    owned = [(_key(f['path']), p) for p in existing for f in (p.get('folders') or [])]
+    owned += [(_key(p['primary_path']), p) for p in existing if p.get('primary_path')]
+    names = {str(p.get('name', '')).casefold(): p for p in existing}
     actions = []
+    taken = []
     for item in legacy:
-        if not item['folder']:
-            actions.append({**item, 'action': 'skip', 'reason': 'no existing folder is known for its conversations'})
-        elif _key(item['folder']) in paths:
-            actions.append({**item, 'action': 'skip', 'reason': 'a Hermes project already owns that folder'})
-        elif item['name'].casefold() in names:
-            actions.append({**item, 'action': 'skip', 'reason': 'a Hermes project with that name exists'})
+        folder = item['folder']
+        key = _key(folder) if folder else None
+        owner = next((p for k, p in owned if key and _within(key, k)), None)
+        swallowed = next((p for k, p in owned if key and _within(k, key) and k != key), None)
+        clash = names.get(item['name'].casefold())
+        if not folder:
+            seen = ', '.join(item.get('folders_seen') or []) or 'none recorded'
+            why = f'its conversations\' folder is missing or offline right now (recorded: {seen}); nothing is guessed, re-run when it is reachable'
+            actions.append({**item, 'action': 'skip', 'reason': why})
+        elif owner:
+            actions.append({**item, 'action': 'skip', 'reason': f"folder already belongs to Hermes project '{owner.get('name')}'" + (' (archived)' if owner.get('archived') else '')})
+        elif swallowed:
+            actions.append({**item, 'action': 'skip', 'reason': f"folder would contain Hermes project '{swallowed.get('name')}'; decide by hand"})
+        elif clash:
+            actions.append({**item, 'action': 'skip', 'reason': 'a Hermes project with that name already exists' + (' (archived)' if clash.get('archived') else '')})
+        elif any(_key(t['folder']) == key for t in taken):
+            actions.append({**item, 'action': 'skip', 'reason': 'another legacy project in this run already uses that folder'})
         else:
             actions.append({**item, 'action': 'create', 'reason': ''})
+            taken.append(item)
     return actions
+
+
+def existing_from_db(home):
+    """The Hermes project list read straight from the gateway home's projects.db, read-only: needs no token and cannot change anything. [] when absent."""
+    db = Path(home) / 'projects.db'
+    if not db.is_file():
+        return []
+    import sqlite3
+    uri = 'file:' + str(db).replace('\\', '/') + '?mode=ro'
+    with sqlite3.connect(uri, uri=True) as conn:
+        conn.row_factory = sqlite3.Row
+        folders = {}
+        for row in conn.execute('select project_id, path from project_folders'):
+            folders.setdefault(row['project_id'], []).append({'path': row['path']})
+        return [{'id': r['id'], 'name': r['name'], 'primary_path': r['primary_path'], 'archived': bool(r['archived']), 'folders': folders.get(r['id'], [])}
+                for r in conn.execute('select id, name, primary_path, archived from projects')]
+
+
+def backup_db(home, destination):
+    """Consistent copy of projects.db (SQLite online backup, safe while the gateway runs) into ``destination``; returns the file or None when there is no database yet."""
+    db = Path(home) / 'projects.db'
+    if not db.is_file():
+        return None
+    import sqlite3
+    import time
+    Path(destination).mkdir(parents=True, exist_ok=True)
+    target = Path(destination) / f"projects-{time.strftime('%Y%m%d-%H%M%S')}.db"
+    source = sqlite3.connect('file:' + str(db).replace('\\', '/') + '?mode=ro', uri=True)
+    try:
+        copy = sqlite3.connect(str(target))
+        try:
+            source.backup(copy)
+        finally:
+            copy.close()
+    finally:
+        source.close()
+    return target
 
 
 class GatewayRpc:

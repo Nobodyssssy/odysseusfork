@@ -52,3 +52,10 @@ def test_the_resume_plugin_still_parses_as_a_module():
         pytest.skip('node not available')
     done = subprocess.run([node, '--input-type=module', '--check'], input=PLUGIN, capture_output=True, text=True)
     assert done.returncode == 0, done.stderr
+
+
+def test_manage_in_hermes_only_opens_hermes_and_adds_no_project_controls_of_its_own():
+    assert "'Manage in Hermes'" in JS and "onclick: () => openProjects()" in JS
+    assert 'Filters' in JS and 'Move to project' in JS                              # tells the user where the native controls are
+    for forbidden in ('projects.create', 'projects.update', 'session.workspace.move', 'session-token', '/api/ws'):
+        assert forbidden not in JS

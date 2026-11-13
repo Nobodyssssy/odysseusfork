@@ -353,6 +353,9 @@ function overviewView(d) {
         h('table', null, h('tbody', null, wiki.tasks.slice(0, 4).map(t => h('tr', null, h('td', null, stateBadge(t.state, t.evidence)), h('td', null, t.summary), h('td', { class: 'num evidence' }, ago(t.created_ts))))))) : h('p', { class: 'empty' }, 'Not registered in the Wiki Steward.')));
 }
 
+// Project management lives in the Hermes Webapp itself (create, rename, archive, folders, move a conversation). This page only opens it; it holds no copy of those controls.
+const MANAGE_HINT = 'Opens Hermes. There: Filters \u25B8 Grouping \u25B8 Project, then + creates a project, a project\u2019s own menu renames, adds folders or archives it, and a conversation\u2019s menu has Move to project (that changes its working folder).';
+
 function renderDetail() {
   const el = $('detail');
   if (store.error) {
@@ -373,7 +376,10 @@ function renderDetail() {
     h('h2', null, d.name, permissionChip(d.permission), d.sources.map(s => h('span', { class: 'chip' }, s))),
     h('div', { class: 'path' }, h('span', null, d.path), h('button', { type: 'button', onclick: () => copy(d.path) }, 'Copy path'),
       d.kind === 'git' ? h('span', { class: 'chip' }, d.branch || 'detached HEAD') : null, d.is_worktree ? h('span', { class: 'chip' }, 'linked worktree') : null,
-      d.git.available ? h('span', { class: d.git.changed ? 'chip warn' : 'chip ok' }, d.git.changed + ' changed') : null),
+      d.git.available ? h('span', { class: d.git.changed ? 'chip warn' : 'chip ok' }, d.git.changed + ' changed') : null,
+      h('button', { type: 'button', class: 'to-hermes', title: MANAGE_HINT, onclick: () => openProjects() }, 'Manage in Hermes')),
+    d.sources.includes('WebUI project') && !d.sources.includes('Hermes project')
+      ? h('p', { class: 'evidence' }, 'Legacy project: not yet in the Hermes project list. An operator can import it with scripts/hermes-projects-import.py (dry run first). Conversations are not moved.') : null,
     tabs, body);
 }
 

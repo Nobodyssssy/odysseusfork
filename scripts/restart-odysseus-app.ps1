@@ -9,7 +9,7 @@ prints what it would stop and what it would keep, and refuses to continue when i
   .\scripts\restart-odysseus-app.ps1 -Apply     # stops the app, starts the 'Odysseus AutoStart' task, waits for :7000 and checks :9130 kept its PID
 #>
 [CmdletBinding()]
-param([switch]$Apply, [switch]$Force, [int]$AppPort = 7000, [int]$GatewayPort = 9130, [string]$Task = 'Odysseus AutoStart')
+param([switch]$Apply, [switch]$Force, [int]$AppPort = 7000, [int]$GatewayPort = 9130, [string]$Task = 'Odysseus AutoStart', [string]$StateDb = '', [string]$Python = 'F:\Odysseus\venv\Scripts\python.exe')
 
 $ErrorActionPreference = 'Stop'
 $procs = @{}
@@ -58,8 +58,8 @@ if ($gateway -and ($stop -contains $gateway -or $stub -eq $gateway)) { throw 'Th
 
 # Turns that are running right now (an unexpired lease in the gateway's own database). Read-only. The restart itself does not touch the gateway, but the app is
 # the page the user watches those runs through, so it is only restarted when nothing is running unless -Force is given.
-$python = 'F:\Odysseus\venv\Scripts\python.exe'
-$db = Join-Path $env:LOCALAPPDATA 'Odysseus\hermes\state\hermes-gateway\state.db'
+$python = $Python
+$db = if ($StateDb) { $StateDb } else { Join-Path $env:LOCALAPPDATA 'Odysseus\hermes\state\hermes-gateway\state.db' }
 $running = '?'
 if ((Test-Path $db) -and (Test-Path $python)) {
     $code = "import sqlite3,sys,time;c=sqlite3.connect('file:'+sys.argv[1].replace(chr(92),'/')+'?mode=ro',uri=True);print(c.execute('select count(*) from session_turn_leases where expires_at>?',(time.time(),)).fetchone()[0])"
@@ -70,19 +70,28 @@ if ($Apply -and $running -ne '0' -and -not $Force) { throw "Turns are running ($
 
 if (-not $Apply) { Write-Host 'Dry run only. Re-run with -Apply to restart.'; return }
 
+function Stop-One([int]$id) {
+    $ErrorActionPreference = 'Continue'      # taskkill prints to stderr when the process already exited; that is fine
+    if (Get-Process -Id $id -ErrorAction SilentlyContinue) { & taskkill.exe /F /PID $id 2>&1 | Out-Null }
+}
 # Children first, branch by branch (never /T across the protected branch), then the app, then its supervisor.
-foreach ($id in ($stop | Where-Object { $_ -ne $app })) { if (Get-Process -Id $id -ErrorAction SilentlyContinue) { & taskkill.exe /F /PID $id | Out-Null } }
-& taskkill.exe /F /PID $app | Out-Null
-if (Get-Process -Id $stub -ErrorAction SilentlyContinue) { & taskkill.exe /F /PID $stub | Out-Null }
+foreach ($id in ($stop | Where-Object { $_ -ne $app })) { Stop-One $id }
+Stop-One $app
+Stop-One $stub
 for ($i = 0; $i -lt 20 -and (Listener $AppPort); $i++) { Start-Sleep -Milliseconds 500 }
 Start-Sleep -Seconds 2
 Start-ScheduledTask -TaskName $Task
 
+# "Up" means the new app answers HTTP on 127.0.0.1 (a redirect to the sign-in page counts); redirects are not followed.
+Add-Type -AssemblyName System.Net.Http
+$handler = New-Object System.Net.Http.HttpClientHandler
+$handler.AllowAutoRedirect = $false
+$client = New-Object System.Net.Http.HttpClient($handler)
+$client.Timeout = [TimeSpan]::FromSeconds(3)
 $up = $false
-for ($i = 0; $i -lt 60; $i++) {
+for ($i = 0; $i -lt 60 -and -not $up; $i++) {
     Start-Sleep -Seconds 2
-    try { $r = Invoke-WebRequest -UseBasicParsing -MaximumRedirection 0 -Uri "http://localhost:$AppPort/" -ErrorAction Stop; $up = $true; break }
-    catch { if ($_.Exception.Response -and [int]$_.Exception.Response.StatusCode -in 301, 302, 303, 307, 308) { $up = $true; break } }
+    try { $up = ([int]$client.GetAsync("http://127.0.0.1:$AppPort/").GetAwaiter().GetResult().StatusCode) -lt 500 } catch { $up = $false }
 }
 $after = Listener $GatewayPort
 Write-Host ("app up: {0}; new app pid {1}; gateway pid before {2}, after {3} ({4})" -f $up, (Listener $AppPort), $gateway, $after, $(if ($gateway -eq $after) { 'unchanged' } else { 'CHANGED' }))
