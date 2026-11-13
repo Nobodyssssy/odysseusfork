@@ -30,15 +30,19 @@ import zipfile
 from pathlib import Path
 
 LLAMA_RELEASE_API = "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest"
+LLAMA_RELEASES_API = "https://api.github.com/repos/ggml-org/llama.cpp/releases?per_page=20"
 
-# Asset name fragments, most specific first. llama.cpp publishes Windows
-# builds as `llama-<bld>-bin-win-<backend>-<arch>.zip`.
+# Asset name fragments, most specific first. llama.cpp publishes Windows builds
+# as `llama-<bld>-bin-win-<backend>-<arch>.zip`.
 VARIANT_ASSETS: dict[str, list[str]] = {
-    "cuda": ["win-cuda-", "win-cu12", "win-cu13"],
+    "cuda": ["win-cuda-12", "win-cuda-", "win-cu12", "win-cu13"],
     "vulkan": ["win-vulkan-"],
     "cpu": ["win-cpu-", "win-avx2-", "win-avx-", "win-x64"],
     "sycl": ["win-sycl-"],
 }
+
+# Assets that are not a runnable server and must never be selected.
+ASSET_EXCLUDE = ("cudart-", "rocm-", "openvino-", "-arm64", "-aarch64")
 
 # Human-facing requirements. Kept factual: a CUDA build needs a driver new
 # enough for the bundled CUDA runtime, and Cookbook never assumes a newer CUDA
@@ -152,11 +156,14 @@ def platform_llama_variants(*, is_windows: bool, is_wsl: bool, is_macos: bool,
     return variants
 
 
-def select_llama_asset(release: dict, variant_id: str) -> dict | None:
+def select_llama_asset(release: dict, variant_id: str, driver_version: str = "") -> dict | None:
     """Pick the Windows x64 asset for ``variant_id`` from a GitHub release.
 
-    Returns the asset dict, or None when the release has no matching Windows
-    build. ARM64 and non-Windows assets are rejected rather than guessed at.
+    Returns the asset dict (with a ``driver_warning`` when the chosen CUDA build
+    is newer than the detected driver can be shown to support), or None when the
+    release has no matching Windows build. Runtime-only archives (``cudart-``),
+    other-vendor builds (rocm/openvino) and ARM64 are rejected rather than
+    guessed at.
     """
     if variant_id == "source":
         return None
@@ -171,8 +178,8 @@ def select_llama_asset(release: dict, variant_id: str) -> dict | None:
         if isinstance(a, dict)
         and isinstance(a.get("name"), str)
         and "win" in a["name"].lower()
-        and "arm" not in a["name"].lower()
         and a["name"].lower().endswith(".zip")
+        and not any(x in a["name"].lower() for x in ASSET_EXCLUDE)
     ]
     if not windows:
         return None
@@ -180,13 +187,37 @@ def select_llama_asset(release: dict, variant_id: str) -> dict | None:
         for asset in windows:
             name = asset["name"].lower()
             if frag in name:
-                return {
+                selected = {
                     "name": asset["name"],
                     "url": asset.get("browser_download_url") or asset.get("url"),
                     "size": asset.get("size"),
                     "id": asset.get("id"),
                 }
+                warning = cuda_driver_warning(asset["name"], driver_version)
+                if warning:
+                    selected["driver_warning"] = warning
+                return selected
     return None
+
+
+def cuda_driver_warning(asset_name: str, driver_version: str) -> str:
+    """Flag a CUDA build that needs a newer driver than the one detected.
+
+    CUDA 13.x needs an NVIDIA driver newer than 580.x; CUDA 12.4 needs 550.96+.
+    The WMI driver string is reported as-is rather than guessed into a
+    user-facing version, so this stays a warning the user can act on instead of
+    a silent assumption.
+    """
+    low = asset_name.lower()
+    if "cuda-13" not in low and "cu13" not in low:
+        return ""
+    if not driver_version:
+        return ("This is a CUDA 13.x build. No NVIDIA driver version could be read, so "
+                "Cookbook cannot confirm it will run — update the driver first or choose CUDA 12.4.")
+    return ("This is a CUDA 13.x build, which needs a newer NVIDIA driver than CUDA 12.4. "
+            f"Detected driver: {driver_version}. If it fails to start, update the driver "
+            "or choose the CUDA 12.4 build.")
+
 
 
 def _validate_via_bash(exe: Path) -> tuple[bool, str]:
@@ -300,6 +331,10 @@ def install_llama_archive(archive: Path, tag: str) -> tuple[bool, str, dict | No
         shutil.rmtree(staging, ignore_errors=True)
         return False, f"Could not activate the new runtime: {exc}", None
 
+    # The executable path must be reported under the ACTIVATED directory —
+    # before the rename it still points into .staging, which the caller would
+    # then store as the selected runtime.
+    exe = _find_server_exe(target)
     ok, detail = validate_runtime_exe(exe) if exe else (False, "missing executable")
     info = {
         "tag": target.name,
@@ -328,16 +363,39 @@ def roll_back_llama_runtime(tag: str) -> tuple[bool, str]:
     return True, str(exe)
 
 
+def _has_windows_assets(release: dict) -> bool:
+    assets = release.get("assets") if isinstance(release, dict) else None
+    if not isinstance(assets, list):
+        return False
+    return any(
+        isinstance(a, dict) and isinstance(a.get("name"), str)
+        and "win" in a["name"].lower() and a["name"].lower().endswith(".zip")
+        for a in assets
+    )
+
+
 def fetch_release_manifest(timeout: int = 30) -> dict:
-    """Fetch and cache the official release manifest (read-only, no install)."""
+    """Find the most recent release that actually ships Windows binaries.
+
+    `/releases/latest` resolves to the stable tag, which currently carries only
+    a `nightly-tag.txt` — the prebuilt zips are attached to nightly
+    prereleases. Returning the stable release would make Cookbook report "no
+    Windows build" on every host, so scan the recent list instead.
+    """
     import urllib.request
 
-    req = urllib.request.Request(LLAMA_RELEASE_API, headers={
+    req = urllib.request.Request(LLAMA_RELEASES_API, headers={
         "Accept": "application/vnd.github+json",
         "User-Agent": "Odysseus-Cookbook",
     })
     with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+        releases = json.loads(resp.read().decode("utf-8"))
+    if not isinstance(releases, list) or not releases:
+        raise RuntimeError("the releases API returned no releases")
+    for release in releases:
+        if isinstance(release, dict) and _has_windows_assets(release):
+            return release
+    return releases[0]
 
 
 def nvidia_driver_version() -> str:

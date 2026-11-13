@@ -45,8 +45,11 @@ let _dependenciesModelHint = '';
 
 function _fetchCookbookUiWithTimeout(input, init = {}, timeoutMs = 20000) {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  return fetch(input, { ...init, signal: controller.signal }).finally(() => clearTimeout(timer));
+  // timeoutMs <= 0 means "no client timeout" — used by long streaming installs,
+  // where the caller supplies its own AbortSignal instead.
+  const timer = timeoutMs > 0 ? setTimeout(() => controller.abort(), timeoutMs) : null;
+  const signal = init.signal || controller.signal;
+  return fetch(input, { ...init, signal }).finally(() => { if (timer) clearTimeout(timer); });
 }
 
 // Radio-style check marking which model directory is a server's download target.
@@ -1063,6 +1066,214 @@ export function _persistEnvState() {
 // mechanism: the browser never supplies an unrestricted filesystem path. A
 // candidate is only selectable when the server validated it by running
 // `--version`; a stale wrapper shows up disabled with its reason.
+
+// ── llama.cpp install dialog ────────────────────────────────────────────
+// Shows only variants that apply to this machine, resolves the official
+// prebuilt asset, and installs it into a versioned app-managed directory.
+// Installation is explicit: nothing downloads until the user presses Install.
+
+async function _llamaRuntimeInfo() {
+  const res = await _fetchCookbookUiWithTimeout('/api/cookbook/llama-runtime', { credentials: 'same-origin' }, 30000);
+  return res.json();
+}
+
+function _renderLlamaInstallSummary(info) {
+  const box = document.getElementById('cookbook-llama-install');
+  if (!box) return;
+  const installed = (info?.summary?.installed) || [];
+  const gpu = info?.gpu || {};
+  const lines = [];
+  if (gpu.name) lines.push(`Detected GPU: ${gpu.name}${gpu.driver ? ` (driver ${gpu.driver})` : ''}`);
+  if (!installed.length) {
+    lines.push('No app-managed llama.cpp runtime installed.');
+  } else {
+    for (const entry of installed) {
+      lines.push(`Installed: ${entry.tag}${entry.executable ? ` — ${entry.executable}` : ' (no executable found)'}`);
+    }
+  }
+  box.innerHTML = lines.map(l => `<div style="font-size:11px;opacity:.75;line-height:1.45;"></div>`).join('');
+  // textContent, not innerHTML: the values come from the server.
+  box.querySelectorAll('div').forEach((el, i) => { el.textContent = lines[i] || ''; });
+}
+
+export async function _llamaRuntimeInstallDialog() {
+  const overlay = document.createElement('div');
+  overlay.className = 'cookbook-llama-picker cookbook-llama-install-picker';
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;z-index:12000;';
+  overlay.innerHTML = '<div class="admin-card" style="width:min(680px,94vw);max-height:84vh;overflow:auto;display:flex;flex-direction:column;gap:8px;"></div>';
+  const card = overlay.firstChild;
+  card.innerHTML = '<h2 style="margin:0;">Install a prebuilt llama.cpp runtime</h2>'
+    + '<div class="cookbook-llama-meta" style="font-size:11px;opacity:.8;"></div>'
+    + '<div class="cookbook-llama-variants" style="display:flex;flex-direction:column;gap:6px;"></div>'
+    + '<div class="cookbook-llama-release" style="font-size:11px;opacity:.85;"></div>'
+    + '<div class="cookbook-llama-progress" style="font-size:11px;white-space:pre-wrap;max-height:120px;overflow:auto;"></div>'
+    + '<div class="cookbook-llama-actions" style="display:flex;gap:6px;justify-content:flex-end;margin-top:6px;"></div>';
+  document.body.appendChild(overlay);
+  const dlgController = new AbortController();
+  const close = () => { dlgController.abort(); overlay.remove(); };
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+  const actions = card.querySelector('.cookbook-llama-actions');
+  const cancelBtn = document.createElement('button');
+  cancelBtn.type = 'button';
+  cancelBtn.className = 'hwfit-gpu-btn';
+  cancelBtn.textContent = 'Close';
+  cancelBtn.addEventListener('click', close);
+  const useBtn = document.createElement('button');
+  useBtn.type = 'button';
+  useBtn.className = 'hwfit-gpu-btn';
+  useBtn.textContent = 'Use this executable';
+  useBtn.disabled = true;
+  useBtn.style.display = 'none';
+  actions.appendChild(cancelBtn);
+  actions.appendChild(useBtn);
+
+  const meta = card.querySelector('.cookbook-llama-meta');
+  const variantBox = card.querySelector('.cookbook-llama-variants');
+  const releaseBox = card.querySelector('.cookbook-llama-release');
+  const progressBox = card.querySelector('.cookbook-llama-progress');
+
+  let info = null;
+  try {
+    info = await _llamaRuntimeInfo();
+  } catch (e) {
+    meta.textContent = `Could not read runtime status: ${e.message}`;
+    return;
+  }
+  _renderLlamaInstallSummary(info);
+  const gpu = info.gpu || {};
+  meta.textContent = gpu.name
+    ? `Detected GPU: ${gpu.name}${gpu.driver ? ` — driver ${gpu.driver}` : ''}${info.recommended ? ` — recommended: ${info.recommended}` : ''}`
+    : 'No GPU detected. A CPU build will be recommended.';
+
+  const variants = (info.variants || []).filter(v => v.prebuilt);
+  if (!variants.length) {
+    variantBox.innerHTML = '<div style="font-size:12px;"></div>';
+    variantBox.firstChild.textContent = 'Prebuilt Windows builds are not offered for this platform.';
+    return;
+  }
+  let chosen = info.recommended || variants[0].id;
+  let asset = null;
+  let installedExe = null;
+
+  variants.forEach((v) => {
+    const row = document.createElement('label');
+    row.style.cssText = 'display:flex;gap:8px;align-items:flex-start;padding:6px;border:1px solid var(--border,#333);border-radius:4px;cursor:pointer;';
+    const radio = document.createElement('input');
+    radio.type = 'radio';
+    radio.name = 'cookbook-llama-variant';
+    radio.value = v.id;
+    if (v.id === chosen) radio.checked = true;
+    row.appendChild(radio);
+    const txt = document.createElement('div');
+    txt.style.cssText = 'flex:1;min-width:0;font-size:11px;';
+    txt.innerHTML = `<div></div><div style="opacity:.75;"></div>`;
+    // Both strings are server-supplied; textContent keeps them inert.
+    txt.firstChild.textContent = v.label + (v.recommended ? ' — recommended' : '');
+    txt.lastChild.textContent = v.requires || '';
+    row.appendChild(txt);
+    variantBox.appendChild(row);
+    radio.addEventListener('change', async () => {
+      chosen = radio.value;
+      asset = null;
+      releaseBox.textContent = 'Checking the latest release…';
+      try {
+        const res = await _fetchCookbookUiWithTimeout(`/api/cookbook/llama-runtime/releases?variant=${encodeURIComponent(chosen)}`, { credentials: 'same-origin' }, 30000);
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+        asset = data;
+        releaseBox.textContent = `${data.tag} — ${data.asset.name} (${Math.round((data.asset.size || 0) / 1048576)} MB)`;
+        installBtn.disabled = false;
+      } catch (e) {
+        releaseBox.textContent = `Could not resolve a release: ${e.message}`;
+        installBtn.disabled = true;
+      }
+    });
+  });
+
+  const installBtn = document.createElement('button');
+  installBtn.type = 'button';
+  installBtn.className = 'hwfit-gpu-btn';
+  installBtn.textContent = 'Install';
+  installBtn.disabled = true;
+  actions.insertBefore(installBtn, cancelBtn);
+  releaseBox.textContent = 'Checking the latest release…';
+
+  installBtn.addEventListener('click', async () => {
+    if (!asset) return;
+    installBtn.disabled = true;
+    progressBox.textContent = 'Downloading…';
+    try {
+      const res = await _fetchCookbookUiWithTimeout('/api/cookbook/llama-runtime/install', {
+        method: 'POST', credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        signal: dlgController.signal,
+        body: JSON.stringify({ variant: chosen, url: asset.asset.url, tag: asset.tag }),
+      }, 0);
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = '';
+      let lastDetail = 'Downloading…';
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        const parts = buf.split('\n\n');
+        buf = parts.pop();
+        for (const part of parts) {
+          const line = part.split('\n').find(l => l.startsWith('data: '));
+          if (!line) continue;
+          const payload = JSON.parse(line.slice(6));
+          if (payload.stream === 'progress' && payload.total) {
+            lastDetail = `Downloading… ${Math.round((payload.received / payload.total) * 100)}%`;
+            progressBox.textContent = lastDetail;
+          } else if (payload.stream === 'error') {
+            progressBox.textContent = `Install failed: ${payload.error}`;
+            installBtn.disabled = false;
+            return;
+          } else if (payload.stream === 'done') {
+            installedExe = payload.info.executable;
+            progressBox.textContent = `Installed ${payload.info.tag} — ${payload.info.version || 'version unknown'}.`
+              + (payload.info.previous ? ' The previous runtime is kept for rollback.' : '');
+            useBtn.disabled = false;
+            useBtn.style.display = '';
+            _renderLlamaInstallSummary(await _llamaRuntimeInfo());
+            return;
+          }
+        }
+      }
+      progressBox.textContent = lastDetail;
+    } catch (e) {
+      progressBox.textContent = `Install failed: ${e.message}`;
+      installBtn.disabled = false;
+    }
+  });
+
+  useBtn.addEventListener('click', () => {
+    if (!installedExe) return;
+    _envState.llamaServerPath = installedExe;
+    try { _persistEnvState(); } catch {}
+    const inp = document.getElementById('cookbook-llama-path');
+    if (inp) inp.value = installedExe;
+    const st = document.getElementById('cookbook-llama-status');
+    if (st) st.textContent = `Selected: ${installedExe}`;
+    close();
+  });
+
+  // Resolve the default variant's release up front.
+  try {
+    const res = await _fetchCookbookUiWithTimeout(`/api/cookbook/llama-runtime/releases?variant=${encodeURIComponent(chosen)}`, { credentials: 'same-origin' }, 30000);
+    const data = await res.json();
+    if (res.ok) {
+      asset = data;
+      releaseBox.textContent = `${data.tag} — ${data.asset.name} (${Math.round((data.asset.size || 0) / 1048576)} MB)`;
+      installBtn.disabled = false;
+    } else {
+      releaseBox.textContent = `Could not resolve a release: ${data.detail || res.status}`;
+    }
+  } catch (e) {
+    releaseBox.textContent = `Could not resolve a release: ${e.message}`;
+  }
+}
 
 export async function _locateLlamaServer() {
   const overlay = document.createElement('div');
@@ -3106,7 +3317,12 @@ function _wireTabEvents(body) {
   });
   const _llamaLocateBtn = document.getElementById('cookbook-llama-locate');
   if (_llamaLocateBtn) _llamaLocateBtn.addEventListener('click', () => _locateLlamaServer());
+  const _llamaInstallBtn = document.getElementById('cookbook-llama-install-btn');
+  if (_llamaInstallBtn) _llamaInstallBtn.addEventListener('click', () => _llamaRuntimeInstallDialog());
   _renderLlamaStatus();
+  // Server-reported runtime summary (GPU, installed builds). Rendered as
+  // skeleton nodes filled with textContent, never innerHTML.
+  _llamaRuntimeInfo().then(_renderLlamaInstallSummary).catch(() => {});
 
 
   // HF token — save on change
@@ -3502,6 +3718,8 @@ function _renderRecipes() {
   html += `<button type="button" class="hwfit-gpu-btn" id="cookbook-llama-clear" style="height:26px;padding:3px 10px;white-space:nowrap;">Clear</button>`;
   html += `</div>`;
   html += `<div id="cookbook-llama-status" style="font-size:11px;margin-top:4px;opacity:0.75;"></div>`;
+  html += `<div id="cookbook-llama-install" style="margin-top:6px;"></div>`;
+  html += `<button type="button" class="hwfit-gpu-btn" id="cookbook-llama-install-btn" style="height:26px;padding:3px 10px;margin-top:6px;align-self:flex-start;">Install prebuilt…</button>`;
   html += '</div>';
   html += '</div>';
 

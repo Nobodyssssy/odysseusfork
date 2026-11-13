@@ -63,3 +63,27 @@ def test_validator_rejects_relative_and_missing_paths():
     assert "Symbolic links and junctions are not accepted." in source
     # The path is never concatenated into a shell string.
     assert 'exec "$1" --version' in source
+
+
+def test_install_dialog_is_explicit_and_platform_aware():
+    source = COOKBOOK.read_text(encoding="utf-8")
+
+    assert 'id="cookbook-llama-install-btn"' in source
+    assert "export async function _llamaRuntimeInstallDialog()" in source
+    # Only prebuilt variants the server says apply to this platform.
+    assert "const variants = (info.variants || []).filter(v => v.prebuilt);" in source
+    # Nothing downloads until Install is pressed.
+    assert "installBtn.disabled = true" in source
+    assert "'/api/cookbook/llama-runtime/install'" in source
+    # Closing the dialog cancels an in-flight download.
+    assert "const dlgController = new AbortController();" in source
+    assert "signal: dlgController.signal" in source
+
+
+def test_server_summary_is_rendered_inert():
+    source = COOKBOOK.read_text(encoding="utf-8")
+
+    # GPU name / install path come from the server; they are set with
+    # textContent, not interpolated into innerHTML.
+    assert "el.textContent = lines[i] || '';" in source
+    assert "txt.firstChild.textContent = v.label" in source

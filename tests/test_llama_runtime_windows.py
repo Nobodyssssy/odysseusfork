@@ -30,19 +30,40 @@ def _zip_with_server(dest: Path, member: str = "llama-b1-bin-win-cuda-x64/llama-
     return dest
 
 
-def test_asset_selection_matches_variant_and_skips_arm():
+def test_asset_selection_matches_variant_and_skips_non_server_assets():
+    # Names mirror the real ggml-org/llama.cpp nightly assets.
     release = {"assets": [
-        {"name": "llama-b1-bin-win-cuda-cu12.4-x64.zip", "browser_download_url": "https://x/a"},
-        {"name": "llama-b1-bin-win-cpu-x64.zip", "browser_download_url": "https://x/b"},
-        {"name": "llama-b1-bin-win-vulkan-x64.zip", "browser_download_url": "https://x/c"},
-        {"name": "llama-b1-bin-win-arm64.zip", "browser_download_url": "https://x/d"},
-        {"name": "llama-b1-bin-linux-x64.tar.gz", "browser_download_url": "https://x/e"},
+        {"name": "cudart-llama-bin-win-cuda-12.4-x64.zip", "browser_download_url": "https://x/cudart"},
+        {"name": "llama-b12368-bin-win-cuda-12.4-x64.zip", "browser_download_url": "https://x/a"},
+        {"name": "llama-b12368-bin-win-cuda-13.5-x64.zip", "browser_download_url": "https://x/a13"},
+        {"name": "llama-b12368-bin-win-cpu-x64.zip", "browser_download_url": "https://x/b"},
+        {"name": "llama-b12368-bin-win-vulkan-x64.zip", "browser_download_url": "https://x/c"},
+        {"name": "llama-b12368-bin-win-sycl-x64.zip", "browser_download_url": "https://x/s"},
+        {"name": "llama-b12368-bin-win-rocm-10.0-x64.zip", "browser_download_url": "https://x/r"},
+        {"name": "llama-b12368-bin-win-cuda-12.4-arm64.zip", "browser_download_url": "https://x/arm"},
+        {"name": "llama-b12368-bin-linux-x64.tar.gz", "browser_download_url": "https://x/e"},
     ]}
-    assert lr.select_llama_asset(release, "cuda")["name"].endswith("win-cuda-cu12.4-x64.zip")
+    # CUDA 12.4 is preferred over CUDA 13.x, and cudart-/rocm/arm are not servers.
+    cuda = lr.select_llama_asset(release, "cuda", "32.0.16.2101")
+    assert cuda["name"] == "llama-b12368-bin-win-cuda-12.4-x64.zip"
+    assert "driver_warning" not in cuda
     assert "cpu" in lr.select_llama_asset(release, "cpu")["name"]
     assert "vulkan" in lr.select_llama_asset(release, "vulkan")["name"]
-    # No Windows asset at all -> no guess.
-    assert lr.select_llama_asset({"assets": release["assets"][4:]}, "cuda") is None
+    assert "sycl" in lr.select_llama_asset(release, "sycl")["name"]
+    # A release with no Windows binaries -> no guess.
+    assert lr.select_llama_asset({"assets": release["assets"][8:]}, "cuda") is None
+
+
+def test_cuda_13_warns_when_driver_is_old():
+    release = {"assets": [
+        {"name": "llama-b1-bin-win-cuda-12.4-x64.zip", "browser_download_url": "u12"},
+        {"name": "llama-b1-bin-win-cuda-13.5-x64.zip", "browser_download_url": "u13"},
+    ]}
+    # With no CUDA 12 asset present, 13.5 is still selected but flagged.
+    only13 = {"assets": release["assets"][1:]}
+    asset = lr.select_llama_asset(only13, "cuda", "32.0.16.2101")
+    assert "13.5" in asset["name"]
+    assert "newer NVIDIA driver" in asset["driver_warning"]
 
 
 def test_variants_are_platform_appropriate():
@@ -87,6 +108,10 @@ def test_install_is_atomic_and_keeps_previous(tmp_path, monkeypatch):
     ok, _msg, info2 = lr.install_llama_archive(second, "b1")
     assert ok and info2["previous"]
     assert lr.llama_previous_dir("b1").is_dir()
+    # The reported executable must be the activated path, never the staging one.
+    assert ".staging" not in info2["executable"]
+    assert info2["executable"].startswith(str(target))
+    assert info2["version"]
 
     ok, restored = lr.roll_back_llama_runtime("b1")
     assert ok and Path(restored).is_file()
