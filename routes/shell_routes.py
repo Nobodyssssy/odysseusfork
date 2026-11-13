@@ -11,6 +11,7 @@ import shlex
 import shutil
 import signal
 import subprocess
+import urllib.parse
 import uuid
 import tempfile
 import time
@@ -1188,6 +1189,19 @@ async def _generate_win_detached(cmd: str, request: Request):
             pass
 
 
+VENDOR_LABELS = {"vllm": "vLLM", "sglang": "SGLang"}
+
+
+# Hosts that may serve llama.cpp release artifacts. Release downloads redirect
+# from github.com to objects.githubusercontent.com, so both are allowed and
+# nothing else is.
+_LLAMA_DOWNLOAD_HOSTS = {
+    "github.com",
+    "objects.githubusercontent.com",
+    "release-assets.githubusercontent.com",
+}
+
+
 def setup_shell_routes() -> APIRouter:
     router = APIRouter(tags=["shell"])
 
@@ -1479,9 +1493,10 @@ def setup_shell_routes() -> APIRouter:
         """Install a prebuilt runtime into a versioned, app-managed directory.
 
         Requires an explicit asset URL resolved from the official releases
-        endpoint (or a local archive path, for testing). Downloads are streamed
-        with progress and are cancelled if the client disconnects. Nothing is
-        activated until the extracted executable answers `--version`.
+        endpoint (or a local archive inside the runtime directory, for testing).
+        Downloads are streamed with progress and are cancelled if the client
+        disconnects. Nothing is activated until the extracted executable answers
+        `--version`.
         """
         _require_admin(request)
         _reject_cross_site(request)
@@ -1496,6 +1511,14 @@ def setup_shell_routes() -> APIRouter:
 
         if archive_path:
             archive = Path(archive_path)
+            # A local archive must live inside the app-managed runtime
+            # directory — an arbitrary path would let a caller stage files
+            # anywhere on disk.
+            root = llama_runtime.llama_runtime_root().resolve()
+            try:
+                archive.resolve().relative_to(root)
+            except ValueError:
+                raise HTTPException(400, "A local archive must be inside the runtime directory.")
             ok, message, info = llama_runtime.install_llama_archive(archive, tag)
             if not ok:
                 raise HTTPException(400, message)
@@ -1503,8 +1526,12 @@ def setup_shell_routes() -> APIRouter:
 
         if not url:
             raise HTTPException(400, "An asset URL or a local archive path is required.")
-        if not re.match(r"^https://", url):
-            raise HTTPException(400, "Only https asset URLs are accepted.")
+        parsed = urllib.parse.urlparse(url)
+        if parsed.scheme != "https" or parsed.hostname not in _LLAMA_DOWNLOAD_HOSTS:
+            raise HTTPException(
+                400,
+                "Only https downloads from the official llama.cpp release host are accepted.",
+            )
 
         root = llama_runtime.llama_runtime_root()
         root.mkdir(parents=True, exist_ok=True)
@@ -1535,6 +1562,7 @@ def setup_shell_routes() -> APIRouter:
 
         yield f"data: {json.dumps({'stream': 'progress', 'detail': 'starting'})}\n\n"
         tmp = archive.with_suffix(".part")
+        activated = False
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "Odysseus-Cookbook"})
             with urllib.request.urlopen(req, timeout=60) as resp:
@@ -1548,16 +1576,19 @@ def setup_shell_routes() -> APIRouter:
                         fh.write(chunk)
                         received += len(chunk)
                         yield (f"data: {json.dumps({'stream': 'progress', 'received': received, 'total': total})}\n\n")
+            ok, message, info = llama_runtime.install_llama_archive(tmp, tag)
+            activated = ok
+            if not ok:
+                yield f"data: {json.dumps({'stream': 'error', 'error': message})}\n\n"
+                return
+            yield f"data: {json.dumps({'stream': 'done', 'info': info})}\n\n"
         except Exception as exc:
-            tmp.unlink(missing_ok=True)
             yield f"data: {json.dumps({'stream': 'error', 'error': str(exc)})}\n\n"
-            return
-        ok, message, info = llama_runtime.install_llama_archive(tmp, tag)
-        tmp.unlink(missing_ok=True)
-        if not ok:
-            yield f"data: {json.dumps({'stream': 'error', 'error': message})}\n\n"
-            return
-        yield f"data: {json.dumps({'stream': 'done', 'info': info})}\n\n"
+        finally:
+            # A cancelled or failed download must never leave a partial archive
+            # that could later be mistaken for a complete one.
+            if not activated:
+                tmp.unlink(missing_ok=True)
 
     @router.get("/api/cookbook/packages")
     async def list_packages(
@@ -1985,6 +2016,14 @@ def setup_shell_routes() -> APIRouter:
                     "trees directly; tmux is used on Linux/WSL."
                 )
                 continue
+            if pkg.get("name") in {"vllm", "sglang"} and _native_windows:
+                pkg["applicable"] = False
+                pkg["installed"] = None
+                pkg["status_note"] = (
+                    f"{VENDOR_LABELS.get(pkg['name'], pkg['name'])} has no native Windows build. "
+                    "Use WSL/Linux or a Linux server; for local GGUF serving use llama.cpp or Ollama."
+                )
+                continue
             if pkg.get("name") == "llama_cpp":
                 if _native_windows:
                     # The old row offered a Linux build toolchain (cmake/g++/git)
@@ -2263,6 +2302,16 @@ def setup_shell_routes() -> APIRouter:
         }
         if pip_name not in known:
             return {"ok": False, "error": f"Unknown package: {pip_name}"}
+        # Native Windows has no supported native install path for these engines.
+        # Refused server-side as well as hidden in the UI, so a stale button or a
+        # direct call cannot start an install that is guaranteed to fail.
+        if os.name == "nt" and pip_name in {"vllm", "sglang[all]"}:
+            return {"ok": False, "error": (
+                f"{pip_name} has no native Windows build. Use WSL/Linux, a Linux "
+                "server, or llama.cpp/Ollama for local GGUF serving."
+            )}
+        if pip_name == "mlx-lm" and not IS_APPLE_SILICON:
+            return {"ok": False, "error": "mlx-lm requires an Apple Silicon Mac."}
         cmd = [_sys.executable, "-m", "pip", "install", pip_name]
         proc = await asyncio.create_subprocess_exec(
             *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE

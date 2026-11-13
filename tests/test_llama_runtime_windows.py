@@ -211,3 +211,128 @@ async def test_packages_marks_tmux_not_applicable_on_native_windows(monkeypatch)
     tmux = next(p for p in data["packages"] if p["name"] == "tmux")
     assert tmux["applicable"] is False
     assert "Windows" in tmux["status_note"]
+
+
+# ── installer hardening ────────────────────────────────────────────────
+
+def test_install_dir_cannot_escape_runtime_root():
+    # A hostile tag must not be able to point outside the runtime directory.
+    weird = lr.llama_install_dir("../../../../Windows/System32")
+    assert ".." not in Path(weird).parts
+    assert weird.parent.name == "llama.cpp"
+
+
+def test_symlink_archive_member_is_rejected(tmp_path):
+    archive = tmp_path / "link.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        info = zipfile.ZipInfo("llama-bin/llama-server.exe")
+        info.external_attr = (stat.S_IFLNK | 0o777) << 16
+        zf.writestr(info, "target")
+    ok, message, exe = lr.extract_llama_archive(archive, tmp_path / "out")
+    assert ok is False and "non-regular" in message
+
+
+def test_failed_reinstall_keeps_previous_runtime(tmp_path, monkeypatch):
+    monkeypatch.setattr(lr, "llama_runtime_root", lambda: tmp_path / "runtimes")
+    ok, _m, info = lr.install_llama_archive(_zip_with_server(tmp_path / "good.zip"), "b7")
+    assert ok
+    good_exe = info["executable"]
+
+    broken = tmp_path / "broken.zip"
+    with zipfile.ZipFile(broken, "w") as zf:
+        zf.writestr("llama-bin/llama-server.exe", "#!/usr/bin/env bash\nexit 127\n")
+    ok2, message, _ = lr.install_llama_archive(broken, "b7")
+    assert ok2 is False
+    # The activated runtime is untouched, and the failed staging dir is gone.
+    assert Path(good_exe).is_file()
+    assert not (tmp_path / "runtimes" / "b7.staging").exists()
+    assert not (tmp_path / "runtimes" / "b7.previous").exists()
+
+
+@pytest.mark.asyncio
+async def test_install_endpoint_rejects_non_official_and_escaping_sources(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    import routes.shell_routes as shell_routes
+    from starlette.requests import Request
+
+    monkeypatch.setattr(shell_routes, "_require_admin", lambda request: None)
+    monkeypatch.setattr(shell_routes, "_reject_cross_site", lambda request: None)
+
+    router = shell_routes.setup_shell_routes()
+    endpoint = next(
+        r.endpoint for r in router.routes
+        if getattr(r, "path", None) == "/api/cookbook/llama-runtime/install" and "POST" in r.methods
+    )
+
+    def _req(payload):
+        req = Request({"type": "http", "method": "POST", "path": "/x", "headers": [],
+                       "app": SimpleNamespace(state=SimpleNamespace(auth_manager=SimpleNamespace()))})
+        async def _json():
+            return payload
+        req.json = _json
+        return req
+
+    import fastapi
+
+    async def _expect_400(payload):
+        with pytest.raises(fastapi.HTTPException) as exc:
+            await endpoint(_req(payload), payload)
+        assert exc.value.status_code == 400
+
+    # Non-official host, plain http, and an archive outside the runtime dir.
+    await _expect_400({"variant": "cuda", "tag": "b1", "url": "https://evil.example/x.zip"})
+    await _expect_400({"variant": "cuda", "tag": "b1", "url": "http://github.com/x.zip"})
+    outside = tmp_path / "outside.zip"
+    outside.write_text("nope")
+    await _expect_400({"variant": "cuda", "tag": "b1", "archive_path": str(outside)})
+
+
+@pytest.mark.asyncio
+async def test_windows_install_refuses_vllm_and_sglang(monkeypatch):
+    from types import SimpleNamespace
+    import routes.shell_routes as shell_routes
+    from starlette.requests import Request
+
+    monkeypatch.setattr(shell_routes, "_require_admin", lambda request: None)
+    router = shell_routes.setup_shell_routes()
+    endpoint = next(
+        r.endpoint for r in router.routes
+        if getattr(r, "path", None) == "/api/cookbook/packages/install" and "POST" in r.methods
+    )
+
+    for name in ("vllm", "sglang[all]", "mlx-lm"):
+        req = Request({"type": "http", "method": "POST", "path": "/x", "headers": [],
+                       "app": SimpleNamespace(state=SimpleNamespace(auth_manager=SimpleNamespace()))})
+        async def _json(name=name):
+            return {"pip": name}
+        req.json = _json
+        body = await endpoint(req)
+        assert body["ok"] is False
+        assert "Windows" in body["error"] or "Apple" in body["error"]
+
+
+@pytest.mark.asyncio
+async def test_windows_catalog_marks_engines_unsupported(monkeypatch):
+    from types import SimpleNamespace
+    import routes.shell_routes as shell_routes
+    from starlette.requests import Request
+
+    monkeypatch.setattr(shell_routes, "_require_admin", lambda request: None)
+    monkeypatch.setattr(shell_routes, "_reject_cross_site", lambda request: None)
+    monkeypatch.setattr(shell_routes, "_PACKAGE_STATUS_CACHE", {})
+    monkeypatch.setattr(shell_routes.shutil, "which", lambda name: None)
+    monkeypatch.setattr(shell_routes, "IS_APPLE_SILICON", False)
+
+    router = shell_routes.setup_shell_routes()
+    endpoint = next(
+        r.endpoint for r in router.routes
+        if getattr(r, "path", None) == "/api/cookbook/packages" and "GET" in r.methods
+    )
+    http_req = Request({"type": "http", "method": "GET", "path": "/api/cookbook/packages", "headers": [],
+                       "app": SimpleNamespace(state=SimpleNamespace(auth_manager=SimpleNamespace(is_configured=True)))})
+    http_req.state.current_user = "admin"
+    data = await endpoint(http_req, None, None, None, None, None, None)
+    for name in ("vllm", "sglang"):
+        row = next(p for p in data["packages"] if p["name"] == name)
+        assert row["applicable"] is False
+        assert "no native Windows build" in row["status_note"]

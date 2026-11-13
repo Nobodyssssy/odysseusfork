@@ -25,6 +25,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import zipfile
 from pathlib import Path
@@ -272,10 +273,19 @@ def extract_llama_archive(archive: Path, dest: Path) -> tuple[bool, str, Path | 
         return False, "The download is missing.", None
     try:
         with zipfile.ZipFile(archive) as zf:
-            # Refuse path traversal and absolute members before writing anything.
-            for member in zf.namelist():
-                if member.startswith(("/", "\\")) or ".." in Path(member).parts:
-                    return False, f"Refusing unsafe archive member: {member}", None
+            # Refuse path traversal, absolute members, links and special files
+            # before writing anything.
+            for member in zf.infolist():
+                name = member.filename
+                if name.startswith(("/", "\\")) or ".." in Path(name).parts:
+                    return False, f"Refusing unsafe archive member: {name}", None
+                mode = member.external_attr >> 16
+                # Only judge the file-type bits when they are present: many zip
+                # writers set just permissions (0o600 << 16) with no type bits,
+                # and that must not be treated as a special file.
+                ftype = mode & 0o170000
+                if ftype and ftype not in (stat.S_IFREG, stat.S_IFDIR):
+                    return False, f"Refusing non-regular archive member: {name}", None
             zf.extractall(dest)
     except (zipfile.BadZipFile, OSError) as exc:
         return False, f"The archive could not be extracted: {exc}", None
