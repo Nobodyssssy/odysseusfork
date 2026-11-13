@@ -1028,7 +1028,7 @@ export function _tmuxCmd(task, tmuxArgs) {
 // that is outside that shape is refused rather than escaped: a crafted id
 // otherwise breaks out of the quoted literal and runs arbitrary PowerShell.
 const _SESSION_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
-function _safeSessionId(task) {
+export function _safeSessionId(task) {
   const sid = String(task?.sessionId ?? '');
   return _SESSION_ID_RE.test(sid) ? sid : '';
 }
@@ -1627,7 +1627,7 @@ export async function _serveAutoFix(panel, envVar) {
   if (!task || !task.payload) return;
   if (!_guardServeRetry(panel, taskEl)) return;
 
-  const killCmd = _tmuxCmd(task, `kill-session -t ${taskId}`);
+  const killCmd = _tmuxCmd(task, `kill-session -t ${_safeSessionId(task)}`);
   try {
     await _fetchWithTimeout('/api/shell/exec', {
       method: 'POST', credentials: 'same-origin',
@@ -1695,7 +1695,7 @@ export async function _serveAutoRetryReplace(panel, flag, value) {
     await _fetchWithTimeout('/api/shell/exec', {
       method: 'POST', credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ command: _tmuxCmd(task, `kill-session -t ${taskId}`) }),
+      body: JSON.stringify({ command: _tmuxCmd(task, `kill-session -t ${_safeSessionId(task)}`) }),
     });
   } catch {}
 
@@ -1737,7 +1737,7 @@ export async function _serveAutoRetryRemove(panel, flag) {
     await _fetchWithTimeout('/api/shell/exec', {
       method: 'POST', credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ command: _tmuxCmd(task, `kill-session -t ${taskId}`) }),
+      body: JSON.stringify({ command: _tmuxCmd(task, `kill-session -t ${_safeSessionId(task)}`) }),
     });
   } catch {}
 
@@ -1770,7 +1770,7 @@ export async function _serveAutoRetry(panel, flag) {
     await _fetchWithTimeout('/api/shell/exec', {
       method: 'POST', credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ command: _tmuxCmd(task, `kill-session -t ${taskId}`) }),
+      body: JSON.stringify({ command: _tmuxCmd(task, `kill-session -t ${_safeSessionId(task)}`) }),
     });
   } catch {}
 
@@ -4090,7 +4090,7 @@ async function _selfHealStaleTasksImpl(opts = {}) {
       const res = await _fetchWithTimeout('/api/shell/exec', {
         method: 'POST', credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ command: _tmuxCmd(t, `has-session -t ${t.sessionId}`), timeout: 5 }),
+        body: JSON.stringify({ command: _tmuxCmd(t, `has-session -t ${_safeSessionId(t)}`), timeout: 5 }),
       });
       const data = await res.json();
       if (data.exit_code === 0) {

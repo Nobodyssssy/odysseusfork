@@ -6,6 +6,7 @@
 
 import uiModule from './ui.js?v=20260916largetoolscroll1';
 import { _diagnose, _showDiagnosis, _clearDiagnosis } from './cookbook-diagnosis.js';
+import { _safeSessionId } from './cookbookRunning.js';
 
 // Shared state/functions injected by init()
 let _envState;
@@ -591,7 +592,8 @@ export async function _runModelDownload(panel, model, backend, hostOverride) {
       const _sshPf = _zh ? `ssh ${_zPort && _zPort !== '22' ? `-p ${_zPort} ` : ''}${_zh} '` : '';
       const _sshSf = _zh ? `'` : '';
       const _probePrefix = _zh ? 'PATH="$HOME/.local/bin:$HOME/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"; ' : '';
-      const _probeCmd = `${_sshPf}${_probePrefix}tmux has-session -t ${zombieCandidate.sessionId} 2>/dev/null${_sshSf}`;
+      const _probeSid = _safeSessionId(zombieCandidate);
+      const _probeCmd = `${_sshPf}${_probePrefix}tmux has-session -t ${_probeSid} 2>/dev/null${_sshSf}`;
       const _r = await _fetchDownloadControlWithTimeout('/api/shell/exec', {
         method: 'POST', credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json' },

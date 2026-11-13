@@ -73,3 +73,38 @@ def test_guard_rejects_the_verified_escape_payload():
     assert not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", payload)
     for benign in ("cookbook-abc12345", "serve-deadbeef", "queue-1a2b3c4d_x-y"):
         assert re.fullmatch(r"[A-Za-z0-9_-]{1,64}", benign)
+
+
+def test_guard_is_exported_so_other_modules_reuse_one_definition():
+    source = _source()
+    assert "export function _safeSessionId(task)" in source
+
+
+def test_download_module_guards_its_zombie_probe():
+    """cookbookDownload.js probes a tmux session for a zombie download task.
+
+    That id also comes from task data and is interpolated into an
+    ssh single-quoted command, so it needs the same shape check.
+    """
+    source = (Path(__file__).resolve().parents[1] / "static" / "js" / "cookbookDownload.js").read_text(encoding="utf-8")
+    assert "import { _safeSessionId } from './cookbookRunning.js';" in source
+    assert "const _probeSid = _safeSessionId(zombieCandidate);" in source
+    assert "tmux has-session -t ${_probeSid}" in source
+    assert "tmux has-session -t ${zombieCandidate.sessionId}" not in source
+
+
+def test_dom_derived_task_id_is_guarded_before_reaching_a_command():
+    """The stop handlers read the id back off the DOM element.
+
+    It round-trips from task data, but it is still data by the time it is
+    interpolated, so the command must go through the guard.
+    """
+    source = _source()
+    assert "_tmuxCmd(task, `kill-session -t ${taskId}`)" not in source
+    assert "_tmuxCmd(task, `kill-session -t ${_safeSessionId(task)}`)" in source
+
+
+def test_loop_variable_session_ids_are_guarded():
+    source = _source()
+    assert "_tmuxCmd(t, `has-session -t ${t.sessionId}`)" not in source
+    assert "_tmuxCmd(t, `has-session -t ${_safeSessionId(t)}`)" in source
