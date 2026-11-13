@@ -1455,6 +1455,16 @@ async def test_local_windows_llama_serve_uses_configured_executable(monkeypatch,
     fake_home = tmp_path / "fake_home"
     _write_mock_native(fake_home / "llama.cpp/build/bin/Release/llama-server.exe", succeeds=True)
     configured = fake_home / "llama.cpp/build/bin/Release/llama-server.exe"
+    # A stale wrapper earlier on PATH, exactly like the host's ~/bin one. The
+    # launch command names `llama-server`, so the runner must put the configured
+    # file's directory first or the wrapper is what actually runs.
+    stale = fake_home / "bin/llama-server"
+    stale.parent.mkdir(parents=True, exist_ok=True)
+    stale.write_text(
+        '#!/usr/bin/env bash\nexec "/d/Odys-Full/llama-cuda/llama-server.exe" "$@"\n',
+        encoding="utf-8",
+    )
+    stale.chmod(0o755)
 
     tmux_log_dir = tmp_path / "tmux_logs"
     tmux_log_dir.mkdir(parents=True)
@@ -1497,10 +1507,12 @@ async def test_local_windows_llama_serve_uses_configured_executable(monkeypatch,
 
     res = _run_shell(
         fake_home, [git_bash_path(runner_file)],
-        path=f"{git_bash_path(configured.parent)}:/usr/bin:/bin",
+        path=f"{git_bash_path(fake_home / 'bin')}:{git_bash_path(configured.parent)}:/usr/bin:/bin",
     )
     assert "llama-server (configured)" in res.stdout
     assert "RUN_NATIVE: -m /dummy/model.gguf --port 8085" in res.stdout
+    # The stale wrapper must not have been the thing that ran.
+    assert "No such file or directory" not in res.stdout
 
     # An unusable configured path is rejected outright — never silently ignored.
     bad = await _post(str(fake_home / "missing" / "llama-server.exe"))

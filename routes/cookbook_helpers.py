@@ -16,7 +16,7 @@ from pydantic import BaseModel
 
 from routes._validators import validate_remote_host, validate_ssh_port
 from routes.cookbook_output import HF_PARTIAL_BLOB_HELPER
-from core.platform_compat import _ssh_exec_argv
+from core.platform_compat import _ssh_exec_argv, git_bash_path
 
 logger = logging.getLogger(__name__)
 
@@ -1395,11 +1395,20 @@ def _append_windows_llama_server_preflight_lines(runner_lines: list[str], config
         # the file may have been moved or deleted since it was selected. If it
         # no longer answers --version we fall back to discovery rather than
         # launching a path that is known to be broken.
-        runner_lines.append(f'_odysseus_llama_bin=\'{_bash_squote(str(configured_path))}\'')
+        # Emit the Git Bash form: PATH entries in the runner are POSIX-style, so
+        # a native `C:\...` value would never match and would not shadow an
+        # earlier same-named wrapper.
+        runner_lines.append(f'_odysseus_llama_bin=\'{_bash_squote(git_bash_path(str(configured_path)))}\'')
         runner_lines.append('if "$_odysseus_llama_bin" --version >/dev/null 2>&1; then')
         runner_lines.append('  echo "[odysseus] llama-server (configured): $_odysseus_llama_bin"')
         runner_lines.append('  hash -r')
         runner_lines.append('  _odysseus_llama_configured=1')
+        # The launch command names `llama-server`, so the configured file only
+        # wins if its directory is FIRST on PATH. The runner already puts
+        # $HOME/llama.cpp/build/bin/Release on PATH, so a "is it present" check
+        # is not enough — an earlier ~/bin wrapper would still shadow it.
+        runner_lines.append('  _odysseus_llama_dir="$(dirname "$_odysseus_llama_bin")"')
+        runner_lines.append('  export PATH="$_odysseus_llama_dir:$PATH"')
         runner_lines.append('else')
         runner_lines.append('  echo "WARNING: the configured llama-server is no longer usable: $_odysseus_llama_bin"')
         runner_lines.append('  echo "  It did not answer --version; falling back to discovery. Re-run Locate executable in Settings."')
