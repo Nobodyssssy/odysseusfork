@@ -3,7 +3,10 @@ import re
 
 from fastapi import APIRouter, HTTPException, Request, Response
 
-from src.application_modes import require_local
+from pydantic import BaseModel, Field
+
+from src.application_modes import require_browser_admin, require_local
+from src.projects_grants import GrantError
 
 
 def _reader(request):
@@ -24,7 +27,18 @@ def _private(response):
     response.headers['X-Content-Type-Options'] = 'nosniff'
 
 
-def make_projects_dashboard_router(get_dashboard, guard=_reader):
+class Preview(BaseModel):
+    action: str = Field(max_length=10)
+    path: str = Field(max_length=600)
+    project_id: str = Field(default='', max_length=40)
+
+
+class Apply(BaseModel):
+    confirmation: str = Field(max_length=200)
+    typed_name: str = Field(default='', max_length=300)
+
+
+def make_projects_dashboard_router(get_dashboard, guard=_reader, get_grants=None, write_guard=require_browser_admin):
     router = APIRouter(prefix='/api/projects-dashboard', tags=['projects-dashboard'])
 
     @router.get('')
@@ -49,5 +63,38 @@ def make_projects_dashboard_router(get_dashboard, guard=_reader):
         if result is None:
             raise HTTPException(404, 'Unknown project')
         return result
+
+    if get_grants is not None:
+        def user_of(request):
+            return str(getattr(request.state, 'current_user', None) or 'admin')
+
+        def refused(error):
+            return HTTPException(error.status, str(error))
+
+        @router.post('/grants/preview')
+        def grants_preview(body: Preview, request: Request, response: Response):
+            write_guard(request)
+            _private(response)
+            if body.project_id and not PROJECT_ID.fullmatch(body.project_id):
+                raise HTTPException(404, 'Unknown project')
+            try:
+                return get_grants().preview(body.action, body.path, body.project_id, user_of(request))
+            except GrantError as error:
+                raise refused(error)
+
+        @router.post('/grants/apply')
+        def grants_apply(body: Apply, request: Request, response: Response):
+            write_guard(request)
+            _private(response)
+            try:
+                return get_grants().apply(body.confirmation, body.typed_name, user_of(request), remote=request.client.host if request.client else None)
+            except GrantError as error:
+                raise refused(error)
+
+        @router.get('/grants/audit')
+        def grants_audit(request: Request, response: Response, limit: int = 20):
+            guard(request)
+            _private(response)
+            return {'audit': get_grants().audit(limit)}
 
     return router

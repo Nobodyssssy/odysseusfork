@@ -841,8 +841,9 @@ app.include_router(make_provider_sync_router(lambda: app.state.provider_sync))
 
 # Projects dashboard: read-only join of existing Hermes/Odysseus records (admin-only, loopback-only).
 from routes.projects_dashboard_routes import make_projects_dashboard_router
-from src.projects_dashboard import from_environment as _projects_dashboard_from_environment
-app.include_router(make_projects_dashboard_router(lambda: _projects_dashboard_from_environment()))
+from src.projects_grants import Runtime as _ProjectsRuntime
+_projects_runtime = _ProjectsRuntime()
+app.include_router(make_projects_dashboard_router(lambda: _projects_runtime.dashboard, get_grants=lambda: _projects_runtime.grants))
 
 # GitHub Copilot device-flow login
 from routes.copilot_routes import setup_copilot_routes

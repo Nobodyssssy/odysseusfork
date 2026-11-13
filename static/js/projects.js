@@ -40,8 +40,9 @@ async function copy(text) {
   try { await navigator.clipboard.writeText(text); toast('Copied'); } catch (_) { toast('Copy failed: select the text manually'); }
 }
 
-async function api(path) {
-  const response = await fetch(API + path, { credentials: 'same-origin', signal: AbortSignal.timeout(20000) });
+async function api(path, payload) {
+  const response = await fetch(API + path, { credentials: 'same-origin', signal: AbortSignal.timeout(20000),
+    ...(payload ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) } : {}) });
   let body = null;
   try { body = await response.json(); } catch (_) { /* non-JSON error page */ }
   if (!response.ok) {
@@ -175,14 +176,24 @@ function sessionsView(d) {
       sessionTable(related, true)) : null);
 }
 
-function worktreeTable(d) {
+function sameFolder(a, b) { return String(a || '').replace(/[\\/]+$/, '').toLowerCase() === String(b || '').replace(/[\\/]+$/, '').toLowerCase(); }
+
+function grantButton(d, w) {
+  const exact = w.permission.state === 'granted' && sameFolder(w.permission.grant, w.path);
+  if (exact) return h('button', { type: 'button', onclick: () => review('revoke', w.path, d.id) }, 'Revoke\u2026');
+  if (w.permission.state === 'none') return h('button', { type: 'button', onclick: () => review('grant', w.path, d.id) }, 'Grant write access\u2026');
+  return h('span', { class: 'evidence' }, w.permission.state === 'blocked' ? 'blocked folder' : 'covered by a parent grant');
+}
+
+function worktreeTable(d, actions) {
   if (!d.worktrees.length) return h('p', { class: 'empty' }, d.kind === 'git' ? 'Git reported no worktrees.' : 'Not a Git repository.');
   return h('table', null,
-    h('thead', null, h('tr', null, h('th', null, 'Worktree'), h('th', null, 'Branch'), h('th', null, 'Write access'))),
+    h('thead', null, h('tr', null, h('th', null, 'Worktree'), h('th', null, 'Branch'), h('th', null, 'Write access'), actions ? h('th', null, '') : null)),
     h('tbody', null, d.worktrees.map(w => h('tr', null,
       h('td', null, h('div', { class: 'mono' }, w.path), w.current ? h('span', { class: 'chip' }, 'this project folder') : null, w.prunable ? h('span', { class: 'chip warn' }, 'missing on disk (prunable)') : null, w.locked ? h('span', { class: 'chip' }, 'locked') : null),
       h('td', null, w.branch || (w.detached ? 'detached ' + w.head : w.head)),
-      h('td', null, permissionChip(w.permission))))));
+      h('td', null, permissionChip(w.permission)),
+      actions ? h('td', null, grantButton(d, w)) : null))));
 }
 
 function gitView(d) {
@@ -224,6 +235,53 @@ function commandBlock(label, text) {
   return h('div', null, h('div', { class: 'evidence' }, label), h('pre', { class: 'cmd' }, text), h('button', { type: 'button', onclick: () => copy(text) }, 'Copy command'));
 }
 
+function auditView() {
+  if (store.audit === undefined) { loadAudit(); return h('p', { class: 'empty' }, 'Loading\u2026'); }
+  if (!store.audit.length) return h('p', { class: 'empty' }, 'No grant or revoke has been made from this page yet.');
+  return h('table', null, h('tbody', null, store.audit.slice(0, 8).map(a => h('tr', null,
+    h('td', { class: 'evidence' }, new Date(a.ts * 1000).toLocaleString()), h('td', null, a.user), h('td', null, a.action), h('td', { class: 'mono' }, a.path), h('td', null, a.result)))));
+}
+
+async function loadAudit() {
+  try { store.audit = (await api('/grants/audit?limit=8')).audit; } catch (_) { store.audit = []; }
+  if (store.tab === 'access') renderDetail();
+}
+
+async function review(action, path, projectId) {
+  let report;
+  try { report = await api('/grants/preview', { action, path, project_id: projectId }); } catch (error) { toast(error.message); return; }
+  const dialog = h('dialog', { class: 'confirm', 'aria-labelledby': 'confirm-title' });
+  const close = () => { dialog.close(); dialog.remove(); };
+  const typed = report.requires_typed_name ? h('input', { type: 'text', 'aria-label': 'Type the folder name to confirm', autocomplete: 'off', placeholder: report.typed_name }) : null;
+  const confirmButton = h('button', { type: 'button', class: 'primary', disabled: report.problems.length ? true : null, onclick: async () => {
+    confirmButton.disabled = true;
+    try {
+      const result = await api('/grants/apply', { confirmation: report.confirmation, typed_name: typed ? typed.value : '' });
+      toast(action === 'grant' ? 'Write access granted. ' + result.live : 'Write access revoked. ' + result.live);
+      store.audit = undefined;
+      close();
+      select(store.selected);
+    } catch (error) { toast(error.message); confirmButton.disabled = false; }
+  } }, action === 'grant' ? 'Grant write access' : 'Revoke write access');
+  if (typed) { confirmButton.disabled = true; typed.addEventListener('input', () => { confirmButton.disabled = typed.value !== report.typed_name || !!report.problems.length; }); }
+  dialog.append(...[
+    h('h2', { id: 'confirm-title' }, action === 'grant' ? 'Grant write access?' : 'Revoke write access?'),
+    h('p', null, 'The Hermes file tools ', action === 'grant' ? 'will be allowed to write in' : 'will no longer be allowed to write in', ':'),
+    h('pre', { class: 'cmd' }, report.canonical),
+    report.worktree ? h('p', { class: 'evidence' }, 'This is a ' + report.worktree.kind + (report.worktree.branch ? ' on branch ' + report.worktree.branch : '') + ' of the selected project.') : null,
+    report.problems.length ? h('div', { class: 'err' }, report.problems.map(x => h('p', null, x))) : null,
+    report.warnings.length ? h('div', { class: 'warnbox' }, h('strong', null, 'Check before you continue'), h('ul', null, report.warnings.map(x => h('li', null, x)))) : null,
+    h('p', { class: 'evidence' }, report.note),
+    report.roots_now.length ? h('p', { class: 'evidence' }, 'Currently granted: ' + report.roots_now.join('; ')) : h('p', { class: 'evidence' }, 'Nothing is currently granted.'),
+    typed ? h('label', null, 'Type ', h('code', null, report.typed_name), ' to confirm', h('br'), typed) : null,
+    h('div', { class: 'actions' }, h('button', { type: 'button', onclick: close }, 'Cancel'), confirmButton),
+    report.expires_in ? h('p', { class: 'evidence' }, 'This confirmation expires in ' + report.expires_in + ' seconds and works once.') : null].filter(Boolean));
+  dialog.addEventListener('cancel', () => dialog.remove());
+  document.body.append(dialog);
+  dialog.showModal();
+  (typed || dialog.querySelector('button')).focus();
+}
+
 function accessView(d) {
   const p = d.permission_detail;
   const roots = p.write_roots;
@@ -241,7 +299,8 @@ function accessView(d) {
     commandBlock('Authorize ' + d.path, p.request),
     p.revoke ? commandBlock('Revoke the grant that covers this project', p.revoke) : null,
     d.worktrees.length > 1 ? h('p', { class: 'evidence' }, 'A Git worktree keeps its Git data outside the worktree folder; authorize the worktree you want the agent to edit, and check the Git view for commit access.') : null,
-    h('h3', null, 'Worktrees'), worktreeTable(d),
+    h('h3', null, 'Worktrees and folders (grant or revoke here)'), worktreeTable(d, true),
+    h('h3', null, 'Recent permission changes'), auditView(),
     h('p', { class: 'evidence', style: 'margin-top:14px' }, p.note));
 }
 

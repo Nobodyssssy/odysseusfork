@@ -8,12 +8,12 @@ button, input { font: inherit; color: inherit; }
 button { border: 1px solid var(--line); background: #262d33; padding: 4px 10px; border-radius: 6px; cursor: pointer; }
 button:hover { border-color: #46525b; }
 button:focus-visible, input:focus-visible, a:focus-visible, [tabindex]:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-.bar { display: flex; align-items: center; gap: 10px; padding: 6px 12px; border-bottom: 1px solid var(--line); background: var(--panel); flex: none; }
+.bar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 6px 12px; border-bottom: 1px solid var(--line); background: var(--panel); flex: none; }
 .bar h1 { margin: 0; font-size: 15px; }
 .back { text-decoration: none; color: var(--dim); }
 .spacer { flex: 1; }
 #search { width: 300px; max-width: 34vw; padding: 4px 8px; border: 1px solid var(--line); border-radius: 6px; background: #15181b; }
-#filters { display: flex; gap: 4px; }
+#filters { display: flex; flex-wrap: wrap; gap: 4px; }
 #filters button[aria-pressed="true"] { background: #1f4b55; border-color: #2e7a8a; }
 #engines { color: var(--dim); font-size: 12px; display: flex; gap: 10px; }
 .layout { display: flex; flex: 1; min-height: 0; }
@@ -34,9 +34,9 @@ button:focus-visible, input:focus-visible, a:focus-visible, [tabindex]:focus-vis
 .chip.ok { color: #7fe0a0; border-color: #2e6b45; background: #1b3326; } .chip.warn { color: #f3b27a; border-color: #7a5030; background: #38281a; }
 .chip.bad { color: #f0928a; border-color: #7a3a3a; background: #382020; } .chip.info { color: #9cc3ff; border-color: #38527a; background: #1d2a3d; }
 .chips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 3px; }
-h2 { font-size: 20px; margin: 0 0 2px; display: flex; align-items: center; gap: 10px; }
+h2 { font-size: 20px; margin: 0 0 2px; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
 h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--dim); margin: 20px 0 6px; }
-.path { color: var(--dim); font-family: Consolas, monospace; font-size: 12px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.path { overflow-wrap: anywhere; color: var(--dim); font-family: Consolas, monospace; font-size: 12px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .tabs { display: flex; gap: 2px; margin: 14px 0 10px; border-bottom: 1px solid var(--line); }
 .tabs button { border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: none; padding: 6px 12px; color: var(--dim); }
 .tabs button[aria-selected="true"] { color: var(--text); border-bottom-color: var(--accent); }
@@ -59,6 +59,14 @@ code { font: 12px Consolas, monospace; }
 #toast { position: fixed; bottom: 14px; right: 14px; background: #263540; border: 1px solid #3a4f5c; padding: 6px 12px; border-radius: 6px; opacity: 0; transition: opacity .15s; pointer-events: none; }
 #toast.show { opacity: 1; }
 .sr { position: absolute; left: -9999px; }
-@media (max-width: 860px) { .layout { flex-direction: column; } #list { width: 100%; max-height: 38vh; border-right: 0; border-bottom: 1px solid var(--line); } #search { max-width: none; flex: 1; } #engines { display: none; } }
+@media (max-width: 860px) { #filters button { padding: 2px 8px; } #detail { padding: 10px 12px 30px; overflow-x: auto; } .tabs { overflow-x: auto; } .layout { flex-direction: column; } #list { width: 100%; max-height: 38vh; border-right: 0; border-bottom: 1px solid var(--line); } #search { max-width: none; flex: 1; } #engines { display: none; } }
 @media (prefers-reduced-motion: no-preference) { .dot.working { animation: pulse 1.8s ease-in-out infinite; } }
 @keyframes pulse { 50% { opacity: .45; } }
+dialog.confirm { max-width: min(640px, 94vw); background: var(--panel); color: var(--text); border: 1px solid #46525b; border-radius: 10px; padding: 16px 18px; }
+dialog.confirm::backdrop { background: rgba(0, 0, 0, .6); }
+dialog.confirm h2 { font-size: 17px; margin: 0 0 8px; }
+dialog.confirm input { width: 100%; margin-top: 4px; padding: 5px 8px; background: #15181b; border: 1px solid var(--line); border-radius: 6px; }
+.actions { display: flex; justify-content: flex-end; gap: 8px; margin: 12px 0 6px; }
+button.primary { background: #1f4b55; border-color: #2e7a8a; }
+.warnbox { border: 1px solid #7a5030; background: #38281a; padding: 8px 12px; border-radius: 8px; margin: 8px 0; }
+.warnbox ul { margin: 4px 0 0; padding-left: 18px; }

@@ -547,7 +547,7 @@ class Dashboard:
 def from_environment(environment=None):
     env = os.environ if environment is None else environment
     local = env.get('LOCALAPPDATA') or str(Path.home() / 'AppData' / 'Local')
-    root = Path(env.get('ODYSSEUS_HERMES_ROOT') or Path(local) / 'Odysseus' / 'hermes')
+    root = Path(env.get('ODYSSEUS_HERMES_COMPONENT_ROOT') or env.get('ODYSSEUS_HERMES_ROOT') or Path(local) / 'Odysseus' / 'hermes')
     wiki = env.get('ODYSSEUS_WIKI_ROOT') or r'F:\Projects\Odysseus-Wiki'
     return Dashboard(hermes_home=env.get('ODYSSEUS_HERMES_HOME') or root / 'state' / 'hermes-gateway',
                      webui_state=env.get('ODYSSEUS_WEBUI_STATE') or Path(local) / 'hermes' / 'webui', component_root=root, wiki_root=wiki if os.path.isdir(wiki) else None, environment=env)
