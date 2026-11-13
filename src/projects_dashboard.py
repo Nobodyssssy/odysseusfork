@@ -433,9 +433,11 @@ class Dashboard:
     def permission(self, path, roots=None, blocked=None):
         roots = self.write_roots() if roots is None else roots
         blocked = self.blocked_folders() if blocked is None else blocked
-        grant = next((r for r in roots if inside(path, r)), None)
-        block = next((b for b in blocked if inside(path, b)), None)
-        legacy = next((r for r in self.legacy_roots() if inside(path, r)), None)
+        # Compare real locations: a junction or symlink inside a granted folder that leads elsewhere is not covered by that grant.
+        real = os.path.realpath(path) if path and os.path.exists(path) else path
+        grant = next((r for r in roots if inside(real, os.path.realpath(r))), None)
+        block = next((b for b in blocked if inside(real, os.path.realpath(b)) or inside(path, b)), None)
+        legacy = next((r for r in self.legacy_roots() if inside(real, os.path.realpath(r))), None)
         if block:
             state, why = 'blocked', 'inside a blocked folder (%s)' % block
         elif grant:

@@ -202,7 +202,111 @@ def test_routes_use_the_write_guard_for_changes_and_the_read_guard_for_the_audit
             raise AssertionError('the guard must run before any grant logic')
 
     app = fastapi.FastAPI()
-    app.include_router(make_projects_dashboard_router(lambda: Boom(), guard=lambda r: None, get_grants=lambda: Boom(), write_guard=deny))
+    app.include_router(make_projects_dashboard_router(lambda: Boom(), guard=lambda r: None, get_grants=lambda: Boom(), write_guard=deny, grants_enabled=lambda: True))
     client = TestClient(app)
     assert client.post('/api/projects-dashboard/grants/preview', json={'action': 'grant', 'path': 'F:\\x'}).status_code == 403
     assert client.post('/api/projects-dashboard/grants/apply', json={'confirmation': 'x'}).status_code == 403
+
+
+class TestFeatureSwitch:
+    def client(self, **kw):
+        fastapi = pytest.importorskip('fastapi')
+        from fastapi.testclient import TestClient
+        from routes.projects_dashboard_routes import make_projects_dashboard_router
+
+        calls = []
+
+        class Grants:
+            def preview(self, *a):
+                calls.append('preview')
+                return {'ok': True}
+
+            def apply(self, *a, **k):
+                calls.append('apply')
+                return {'ok': True}
+
+            def audit(self, limit):
+                return []
+
+        class Dash:
+            def overview(self):
+                return {'projects': []}
+
+        app = fastapi.FastAPI()
+        app.include_router(make_projects_dashboard_router(lambda: Dash(), guard=lambda r: None, get_grants=lambda: Grants(), write_guard=lambda r: None, **kw))
+        return TestClient(app), calls
+
+    PREVIEW = {'action': 'grant', 'path': 'F:\\x', 'project_id': ''}
+
+    def test_the_switch_is_off_by_default_and_rejects_direct_calls(self, monkeypatch):
+        monkeypatch.delenv('ODYSSEUS_PROJECTS_GRANTS', raising=False)
+        client, calls = self.client()
+        assert client.post('/api/projects-dashboard/grants/preview', json=self.PREVIEW).status_code == 403
+        assert client.post('/api/projects-dashboard/grants/apply', json={'confirmation': 'x', 'typed_name': 'x'}).status_code == 403
+        assert calls == [] and client.get('/api/projects-dashboard').json()['grants'] == {'available': True, 'enabled': False, 'switch': 'ODYSSEUS_PROJECTS_GRANTS'}
+        for value in ('0', '', 'no', 'false', 'maybe'):
+            monkeypatch.setenv('ODYSSEUS_PROJECTS_GRANTS', value)
+            assert client.post('/api/projects-dashboard/grants/preview', json=self.PREVIEW).status_code == 403
+
+    def test_switch_on_with_authentication_reaches_the_grant_logic(self, monkeypatch):
+        monkeypatch.setenv('ODYSSEUS_PROJECTS_GRANTS', '1')
+        client, calls = self.client(auth_is_off=lambda: False)
+        assert client.post('/api/projects-dashboard/grants/preview', json=self.PREVIEW).status_code == 200
+        assert client.get('/api/projects-dashboard').json()['grants']['enabled'] is True and calls == ['preview']
+
+    def test_switch_on_but_authentication_disabled_still_fails_closed(self, monkeypatch):
+        monkeypatch.setenv('ODYSSEUS_PROJECTS_GRANTS', 'true')
+        client, calls = self.client(auth_is_off=lambda: True)
+        assert client.post('/api/projects-dashboard/grants/preview', json=self.PREVIEW).status_code == 403
+        assert client.post('/api/projects-dashboard/grants/apply', json={'confirmation': 'x'}).status_code == 403 and calls == []
+
+    def test_production_wiring_leaves_the_switch_and_auth_check_at_their_safe_defaults(self):
+        import inspect
+        from routes import projects_dashboard_routes as routes
+        parameters = inspect.signature(routes.make_projects_dashboard_router).parameters
+        assert parameters['grants_enabled'].default is routes.grants_switch and parameters['auth_is_off'].default is routes._fail_closed_without_auth
+        source = (Path(__file__).resolve().parents[2] / 'app.py').read_text(encoding='utf-8')
+        wiring = [line for line in source.splitlines() if 'make_projects_dashboard_router(' in line and 'import' not in line][0]
+        assert 'grants_enabled' not in wiring and 'auth_is_off' not in wiring and 'write_guard' not in wiring and 'guard=' not in wiring
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='NTFS junctions')
+class TestJunctions:
+    def junction(self, link, target):
+        done = subprocess.run(['cmd', '/c', 'mklink', '/J', str(link), str(target)], capture_output=True, text=True)
+        if done.returncode:
+            pytest.skip('cannot create a junction here: ' + done.stdout + done.stderr)
+
+    def test_a_junction_inside_a_granted_folder_that_leads_elsewhere_is_not_covered(self, tmp_path):
+        granted, outside = tmp_path / 'granted', tmp_path / 'outside'
+        granted.mkdir()
+        outside.mkdir()
+        self.junction(granted / 'link', outside)
+        dash = pd.Dashboard(None, None, None, None, environment={})
+        assert dash.permission(str(granted / 'link'), [str(granted)], [])['state'] == 'none'
+        assert dash.permission(str(granted), [str(granted)], [])['state'] == 'granted'
+
+    def test_a_junction_to_an_ungranted_project_folder_gets_that_folders_real_state(self, tmp_path):
+        real, link = tmp_path / 'real', tmp_path / 'via'
+        real.mkdir()
+        self.junction(link, real)
+        dash = pd.Dashboard(None, None, None, None, environment={})
+        assert dash.permission(str(link), [str(real)], [])['state'] == 'granted'
+        assert dash.permission(str(link), [], [str(real)])['state'] == 'blocked'
+
+    def test_grant_through_a_junction_resolves_to_the_real_folder_and_a_foreign_target_is_refused(self, world, tmp_path):
+        manager, component, dash, project, repo, tree, other, plain, _ = world
+        link = tmp_path / 'work' / 'alias-of-feature'
+        self.junction(link, tree)
+        report = manager.preview('grant', str(link), project, 'admin')
+        assert pd.norm(report['canonical']) == pd.norm(os.path.realpath(tree)) and any('junction or symbolic link' in w for w in report['warnings'])
+        stranger = tmp_path / 'work' / 'stranger2'
+        stranger.mkdir()
+        run_git(stranger, 'init', '-q', '-b', 'main')
+        sneaky = tmp_path / 'work' / 'looks-like-feature'
+        self.junction(sneaky, stranger)
+        refused = manager.preview('grant', str(sneaky), project, 'admin')
+        assert refused['problems'] and 'confirmation' not in refused
+        token = report['confirmation']
+        manager.apply(token, os.path.basename(report['canonical']), 'admin')
+        assert [pd.norm(r) for r in component.write_roots() if pd.norm(r) == pd.norm(os.path.realpath(tree))] and all(pd.norm(r) != pd.norm(link) for r in component.write_roots())

@@ -26,6 +26,15 @@ NOTE = ('This changes which folders the Hermes file tools may write. It is an ap
         'git hooks and any program running as you are not limited by it.')
 
 
+SWITCH = 'ODYSSEUS_PROJECTS_GRANTS'
+
+
+def enabled(environment=None):
+    """Server-side switch for grant/revoke from the dashboard. OFF unless explicitly set to 1/true/yes/on; read on every request."""
+    env = os.environ if environment is None else environment
+    return str(env.get(SWITCH, '')).strip().lower() in ('1', 'true', 'yes', 'on')
+
+
 class GrantError(Exception):
     def __init__(self, message, status=409):
         super().__init__(message)
@@ -62,9 +71,12 @@ class GrantManager:
         except Exception as exc:
             raise GrantError('The Webapp gateway is not a Hermes component managed by Odysseus here; grants cannot be changed from this page (%s).' % type(exc).__name__)
         canonical = os.path.normpath(os.path.realpath(path))
+        redirected = _norm(path) != _norm(canonical)
         existing = next((r for r in roots if _norm(r) == _norm(canonical) or _norm(os.path.realpath(r)) == _norm(canonical)), None)
         report = {'action': action, 'path': path, 'canonical': canonical, 'roots_now': roots, 'warnings': [], 'problems': [], 'worktree': None, 'covers_existing': [],
                   'note': NOTE, 'requires_typed_name': action == 'grant', 'typed_name': os.path.basename(canonical.rstrip('\\/')) if action == 'grant' else None}
+        if redirected:
+            report['warnings'].append('%s is a junction or symbolic link. Only its real location, %s, is used.' % (path, canonical))
         if action == 'revoke':
             if not existing:
                 report['problems'].append('This exact folder is not a granted write root; nothing to revoke. Only exact grants can be removed here.')

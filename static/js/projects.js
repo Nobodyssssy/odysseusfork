@@ -179,6 +179,7 @@ function sessionsView(d) {
 function sameFolder(a, b) { return String(a || '').replace(/[\\/]+$/, '').toLowerCase() === String(b || '').replace(/[\\/]+$/, '').toLowerCase(); }
 
 function grantButton(d, w) {
+  if (!store.overview?.grants?.enabled) return null;
   const exact = w.permission.state === 'granted' && sameFolder(w.permission.grant, w.path);
   if (exact) return h('button', { type: 'button', onclick: () => review('revoke', w.path, d.id) }, 'Revoke\u2026');
   if (w.permission.state === 'none') return h('button', { type: 'button', onclick: () => review('grant', w.path, d.id) }, 'Grant write access\u2026');
@@ -299,7 +300,9 @@ function accessView(d) {
     commandBlock('Authorize ' + d.path, p.request),
     p.revoke ? commandBlock('Revoke the grant that covers this project', p.revoke) : null,
     d.worktrees.length > 1 ? h('p', { class: 'evidence' }, 'A Git worktree keeps its Git data outside the worktree folder; authorize the worktree you want the agent to edit, and check the Git view for commit access.') : null,
-    h('h3', null, 'Worktrees and folders (grant or revoke here)'), worktreeTable(d, true),
+    h('h3', null, store.overview?.grants?.enabled ? 'Worktrees and folders (grant or revoke here)' : 'Worktrees and folders'),
+    store.overview?.grants?.enabled ? null : h('p', { class: 'evidence' }, 'Granting and revoking from this page is switched off on this server. Use the commands above, or ask the administrator to set ' + (store.overview?.grants?.switch || 'ODYSSEUS_PROJECTS_GRANTS') + '=1.'),
+    worktreeTable(d, store.overview?.grants?.enabled),
     h('h3', null, 'Recent permission changes'), auditView(),
     h('p', { class: 'evidence', style: 'margin-top:14px' }, p.note));
 }

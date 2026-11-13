@@ -34,6 +34,8 @@ from src.hermes_component import (ComponentError, SourcePin, atomic_bytes, atomi
 
 ORIGINS = ('managed', 'adopted')
 PLUGIN_NAME = 'odysseus-return'
+RESUME_PLUGIN_NAME = 'odysseus-resume'
+KNOWN_PREVIOUS_RESUME_SHA256 = ()          # earlier shipped copies of the resume plugin that may be upgraded in place (none yet)
 WORKSPACE_GRANTS_PLUGIN = 'odysseus-workspace-grants'
 WORKSPACE_GRANTS_PLUGIN_SOURCE = 'integrations/hermes-mode/plugins/odysseus-workspace-grants'
 KNOWN_PREVIOUS_PLUGIN_SHA256 = ('f72f51dabc67c4c99f40aca182ac66546220c678e5341020c95c3e73536d1760',
@@ -463,6 +465,9 @@ class WebappComponent:
         self.install_desktop_plugin(home_path)
         self.install_workspace_grants_plugin(home_path, config['python'])
         updated = dict(config)
+        plugins = self.installed_desktop_plugins(home_path)
+        if plugins != config.get('desktop_plugins'):
+            updated['desktop_plugins'] = plugins
         if moved:
             updated['home'] = str(home_path)
         if new_port != current_port:
@@ -580,13 +585,13 @@ class WebappComponent:
                 raise ComponentError('webapp.public_url engages the gateway sign-in gate, which needs an auth provider the user configures '
                                      '(dashboard.basic_auth); none is configured in this home, so no public URL was set.')
         self._prepare_home(runtime, home_path, port, public_url or '', repo_roots, schema)
-        plugin = self.install_desktop_plugin(home_path)
+        self.install_desktop_plugin(home_path)
         self._write_release(release_dir, 'ready', revision=pin.revision, origin='managed', receipt_sha256=verdict['receipt_sha256'], tools=tool_versions)
         return {'version': 1, 'kind': 'webapp', 'enabled': True, 'origin': 'managed', 'release': release,
                 'previous': previous.get('release') if previous else None, 'agent': str(source), 'python': runtime, 'python_origin': runtime_origin,
                 'home': str(home_path), 'bundle': str(bundle), 'url': f'http://127.0.0.1:{port}/', 'public_url': public_url or '',
                 'revisions': {'webapp': pin.revision}, 'build': {'receipt_sha256': verdict['receipt_sha256'], 'tools': tool_versions},
-                'desktop_plugins': [plugin]}
+                'desktop_plugins': self.installed_desktop_plugins(home_path)}
 
     # -- gateway home (managed only) -------------------------------------------------------
     @staticmethod
@@ -613,22 +618,48 @@ class WebappComponent:
         shutil.copy2(config, backup)
         self._hermes_yaml(python, _WRITE_SETTINGS, str(config), json.dumps(settings))
 
+    def _plugin_pairs(self, home):
+        """(name, source, target, upgradable hashes) for each Odysseus desktop plugin. The return plugin is required; the resume plugin is
+        installed only when this Odysseus ships it, so an older install keeps working unchanged."""
+        folder = self.application_root / 'integrations/hermes-mode/desktop-plugins'
+        out = []
+        for name, known, required in ((PLUGIN_NAME, KNOWN_PREVIOUS_PLUGIN_SHA256, True), (RESUME_PLUGIN_NAME, KNOWN_PREVIOUS_RESUME_SHA256, False)):
+            source = folder / name / 'plugin.js'
+            if not source.is_file():
+                if required:
+                    raise ComponentError('The packaged desktop plugin is missing.')
+                continue
+            out.append((name, source, Path(home) / 'desktop-plugins' / name / 'plugin.js', known))
+        return out
+
+    @staticmethod
+    def _same_plugin(a, b):
+        """Equal apart from line endings: a Windows checkout turns the packaged file into CRLF, while a copy installed from the repository is LF."""
+        return a.replace(b'\r\n', b'\n') == b.replace(b'\r\n', b'\n')
+
     def check_desktop_plugin(self, home):
-        """Raise if installing the return plugin into ``home`` would overwrite something different. Writes nothing."""
-        source = self.application_root / 'integrations/hermes-mode/desktop-plugins' / PLUGIN_NAME / 'plugin.js'
-        if not source.is_file():
-            raise ComponentError('The packaged desktop plugin is missing.')
-        target = Path(home) / 'desktop-plugins' / PLUGIN_NAME / 'plugin.js'
-        if target.exists() and target.read_bytes() != source.read_bytes() and hashlib.sha256(target.read_bytes()).hexdigest() not in KNOWN_PREVIOUS_PLUGIN_SHA256:
-            raise ComponentError('A different desktop plugin with this name already exists; it was not overwritten.')
-        return source, target
+        """Raise if installing the Odysseus plugins into ``home`` would overwrite something different. Writes nothing. Returns the return plugin's (source, target)."""
+        pairs = self._plugin_pairs(home)
+        for name, source, target, known in pairs:
+            if target.exists():
+                have = target.read_bytes()
+                digests = {hashlib.sha256(have).hexdigest(), hashlib.sha256(have.replace(b'\r\n', b'\n')).hexdigest()}
+                if not self._same_plugin(have, source.read_bytes()) and not digests & set(KNOWN_PREVIOUS_PLUGIN_SHA256 if name == PLUGIN_NAME else known):
+                    raise ComponentError('A different desktop plugin with this name already exists; it was not overwritten.')
+        return pairs[0][1], pairs[0][2]
 
     def install_desktop_plugin(self, home):
-        """Copy the Odysseus return plugin into a managed home's desktop-plugins folder; a different existing plugin is never overwritten."""
-        source, target = self.check_desktop_plugin(home)
-        if not target.exists() or target.read_bytes() != source.read_bytes():
-            atomic_bytes(target, source.read_bytes())
+        """Copy the Odysseus desktop plugins (return, resume) into a managed home's desktop-plugins folder. Idempotent (a copy that differs only in line
+        endings is already installed and is left alone); a recognised earlier copy of ours is upgraded; a different existing plugin is never overwritten.
+        Every conflict is found before anything is written. Returns the return plugin's name."""
+        self.check_desktop_plugin(home)
+        for name, source, target, known in self._plugin_pairs(home):
+            if not target.exists() or not self._same_plugin(target.read_bytes(), source.read_bytes()):
+                atomic_bytes(target, source.read_bytes())
         return PLUGIN_NAME
+
+    def installed_desktop_plugins(self, home):
+        return [name for name, source, target, known in self._plugin_pairs(home) if target.is_file() and self._same_plugin(target.read_bytes(), source.read_bytes())]
 
     def install_workspace_grants_plugin(self, home, python):
         """Copy the workspace-grants plugin into a managed home and enable it, preserving the existing plugins.enabled list.
@@ -1002,6 +1033,10 @@ class WebappComponent:
             if not (Path(config['home']) / 'config.yaml').is_file():
                 raise ComponentError('The gateway home is missing or incomplete; run repair (it does not rebuild).')
             self.install_workspace_grants_plugin(Path(config['home']), config['python'])
+            try:                                              # keeps the Odysseus desktop plugins current at every start; a convenience, never a reason not to start
+                self.install_desktop_plugin(Path(config['home']))
+            except (ComponentError, OSError) as exc:
+                self.last_actions.append(f'desktop plugins left unchanged: {exc}')
             state = self.status()['state']
             if state == 'ready':
                 return self.status()

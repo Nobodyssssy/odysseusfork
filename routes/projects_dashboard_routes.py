@@ -6,7 +6,7 @@ from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
 from src.application_modes import require_browser_admin, require_local
-from src.projects_grants import GrantError
+from src.projects_grants import GrantError, enabled as grants_switch
 
 
 def _reader(request):
@@ -38,14 +38,22 @@ class Apply(BaseModel):
     typed_name: str = Field(default='', max_length=300)
 
 
-def make_projects_dashboard_router(get_dashboard, guard=_reader, get_grants=None, write_guard=require_browser_admin):
+def _fail_closed_without_auth():
+    from src.owner_identity import auth_disabled
+    return auth_disabled()
+
+
+def make_projects_dashboard_router(get_dashboard, guard=_reader, get_grants=None, write_guard=require_browser_admin, grants_enabled=grants_switch,
+                                   auth_is_off=_fail_closed_without_auth):
     router = APIRouter(prefix='/api/projects-dashboard', tags=['projects-dashboard'])
 
     @router.get('')
     def overview(request: Request, response: Response):
         guard(request)
         _private(response)
-        return get_dashboard().overview()
+        result = get_dashboard().overview()
+        result['grants'] = {'available': get_grants is not None, 'enabled': bool(get_grants is not None and grants_enabled()), 'switch': 'ODYSSEUS_PROJECTS_GRANTS'}
+        return result
 
     @router.get('/sessions')
     def sessions(request: Request, response: Response):
@@ -68,12 +76,21 @@ def make_projects_dashboard_router(get_dashboard, guard=_reader, get_grants=None
         def user_of(request):
             return str(getattr(request.state, 'current_user', None) or 'admin')
 
+        def mutation_gate(request):
+            # Order matters: the switch first (nothing else is evaluated or revealed when off), then the usual same-origin administrator
+            # check, then an explicit refusal when authentication is disabled (require_admin would let everyone through).
+            if not grants_enabled():
+                raise HTTPException(403, 'Grant changes from the dashboard are switched off on this server.')
+            write_guard(request)
+            if auth_is_off():
+                raise HTTPException(403, 'Grant changes need authentication to be enabled.')
+
         def refused(error):
             return HTTPException(error.status, str(error))
 
         @router.post('/grants/preview')
         def grants_preview(body: Preview, request: Request, response: Response):
-            write_guard(request)
+            mutation_gate(request)
             _private(response)
             if body.project_id and not PROJECT_ID.fullmatch(body.project_id):
                 raise HTTPException(404, 'Unknown project')
@@ -84,7 +101,7 @@ def make_projects_dashboard_router(get_dashboard, guard=_reader, get_grants=None
 
         @router.post('/grants/apply')
         def grants_apply(body: Apply, request: Request, response: Response):
-            write_guard(request)
+            mutation_gate(request)
             _private(response)
             try:
                 return get_grants().apply(body.confirmation, body.typed_name, user_of(request), remote=request.client.host if request.client else None)
