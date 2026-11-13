@@ -1352,3 +1352,86 @@ async def test_generated_runner_broken_first_healthy_second_e2e(monkeypatch, tmp
     assert "RUN_NATIVE: -m /dummy/model.gguf --port 8090" in res.stdout
     assert "error: missing libllama.so" not in res.stdout
     assert "Native llama-server not found — building from source" not in res.stdout
+
+
+@pytest.mark.asyncio
+async def test_local_windows_llama_serve_validates_before_launch(monkeypatch, tmp_path):
+    """Local Windows must resolve and validate llama-server, never launch a stale wrapper.
+
+    Regression: the POSIX source-build block was skipped for local Windows, so the
+    runner put ~/bin first on PATH and executed a wrapper whose exec target had been
+    deleted -> exit 127 with a bare "No such file or directory". The runner must now
+    probe llama-server.exe and llama-server, reject candidates that cannot answer
+    --version, and stop with an actionable reason when nothing is usable.
+    """
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, MagicMock
+    from routes.cookbook_helpers import ServeRequest
+    import routes.cookbook_routes as cookbook_routes
+    from starlette.requests import Request
+
+    fake_home = tmp_path / "fake_home"
+    stale = fake_home / "bin/llama-server"
+    stale.parent.mkdir(parents=True, exist_ok=True)
+    stale.write_text(
+        '#!/usr/bin/env bash\nexec "/d/Odys-Full/llama-cuda/llama-server.exe" "$@"\n',
+        encoding="utf-8",
+    )
+    stale.chmod(0o755)
+
+    tmux_log_dir = tmp_path / "tmux_logs"
+    tmux_log_dir.mkdir(parents=True)
+    monkeypatch.setattr(cookbook_routes, "TMUX_LOG_DIR", tmux_log_dir)
+    monkeypatch.setattr(cookbook_routes, "require_admin", lambda request: None)
+    monkeypatch.setattr(cookbook_routes, "_binary_available", AsyncMock(return_value=True))
+    monkeypatch.setattr(cookbook_routes, "load_stored_hf_token", lambda **kwargs: "")
+    monkeypatch.setattr("core.database.SessionLocal", MagicMock())
+
+    class _Proc:
+        returncode = 0
+        stderr = None
+        async def wait(self):
+            return 0
+    monkeypatch.setattr(cookbook_routes.asyncio, "create_subprocess_shell", AsyncMock(return_value=_Proc()))
+
+    router = cookbook_routes.setup_cookbook_routes()
+    endpoint = next(
+        r.endpoint for r in router.routes
+        if r.path == "/api/model/serve" and "POST" in r.methods
+    )
+
+    def _post():
+        http_req = Request({
+            "type": "http", "method": "POST", "path": "/api/model/serve", "headers": [],
+            "app": SimpleNamespace(state=SimpleNamespace(auth_manager=SimpleNamespace(
+                is_configured=True, is_admin=lambda user: user == "admin"))),
+        })
+        http_req.state.current_user = "admin"
+        http_req.state.local_model_authority = True
+        return endpoint(http_req, ServeRequest(
+            repo_id="test/repo", cmd="llama-server -m /dummy/model.gguf --port 8085",
+            remote_host=None))
+
+    resp = await _post()
+    assert resp["ok"] is True
+    runner_file = tmux_log_dir / f"{resp['session_id']}_run.sh"
+    script = runner_file.read_text(encoding="utf-8")
+
+    assert "ODYSSEUS_PREFLIGHT_EXIT=127" in script
+    assert "for _name in llama-server.exe llama-server" in script
+    assert "building from source" not in script
+
+    res = _run_shell(fake_home, [git_bash_path(runner_file)],
+                     path=f"{git_bash_path(fake_home / 'bin')}:/usr/bin:/bin")
+    assert "no usable llama-server" in res.stdout
+    assert "RUN_NATIVE" not in res.stdout
+    assert "Odysseus will not download or replace a runtime" in res.stdout
+
+    # A healthy native executable is selected, and the stale wrapper is bypassed.
+    _write_mock_native(fake_home / "llama.cpp/build/bin/Release/llama-server.exe", succeeds=True)
+    res2 = _run_shell(
+        fake_home, [git_bash_path(runner_file)],
+        path=f"{git_bash_path(fake_home / 'bin')}:{git_bash_path(fake_home / 'llama.cpp/build/bin/Release')}:/usr/bin:/bin",
+    )
+    assert "RUN_NATIVE: -m /dummy/model.gguf --port 8085" in res2.stdout
+    assert "no usable llama-server" not in res2.stdout

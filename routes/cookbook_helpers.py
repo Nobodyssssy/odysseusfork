@@ -1080,18 +1080,22 @@ def _append_llama_server_resolution_definition_lines(runner_lines: list[str]) ->
     runner_lines.append('  local -a _parts')
     runner_lines.append('  read -r -a _parts <<< "$PATH"')
     runner_lines.append('  IFS="$_saved_ifs"')
-    runner_lines.append('  local _dir _cand')
+    runner_lines.append('  local _dir _cand _name')
     runner_lines.append('  for _dir in "${_parts[@]}"; do')
     runner_lines.append('    [ -n "$_dir" ] || continue')
-    runner_lines.append('    _cand="$_dir/llama-server"')
-    runner_lines.append('    [ -x "$_cand" ] || continue')
-    runner_lines.append('    if [ -f "$_cand" ] && [ ! -L "$_cand" ] && grep -Fxq "$_marker" "$_cand" 2>/dev/null; then')
-    runner_lines.append('      continue')
-    runner_lines.append('    fi')
-    runner_lines.append('    if "$_cand" --version >/dev/null 2>&1; then')
-    runner_lines.append('      _odysseus_llama_bin="$_cand"')
-    runner_lines.append('      break')
-    runner_lines.append('    fi')
+    runner_lines.append('    # Native Windows builds are `llama-server.exe`; Git Bash and POSIX')
+    runner_lines.append('    # installs are `llama-server`. Probe both, preferring the native one.')
+    runner_lines.append('    for _name in llama-server.exe llama-server; do')
+    runner_lines.append('      _cand="$_dir/$_name"')
+    runner_lines.append('      [ -x "$_cand" ] || continue')
+    runner_lines.append('      if [ -f "$_cand" ] && [ ! -L "$_cand" ] && grep -Fxq "$_marker" "$_cand" 2>/dev/null; then')
+    runner_lines.append('        continue')
+    runner_lines.append('      fi')
+    runner_lines.append('      if "$_cand" --version >/dev/null 2>&1; then')
+    runner_lines.append('        _odysseus_llama_bin="$_cand"')
+    runner_lines.append('        break 2')
+    runner_lines.append('      fi')
+    runner_lines.append('    done')
     runner_lines.append('  done')
     runner_lines.append('  if [ -f "$HOME/bin/llama-server" ] && [ ! -L "$HOME/bin/llama-server" ] && grep -Fxq "$_marker" "$HOME/bin/llama-server" 2>/dev/null; then')
     runner_lines.append('    if [ -n "$_odysseus_llama_bin" ]; then')
@@ -1223,6 +1227,33 @@ def _append_llama_server_finalization_lines(runner_lines: list[str], platform_hi
     runner_lines.append('if [ -z "$_odysseus_llama_bin" ]; then')
     runner_lines.append(f'  echo "{err_msg}"')
     runner_lines.append('  ODYSSEUS_PREFLIGHT_EXIT=127')
+    runner_lines.append('fi')
+
+
+def _append_windows_llama_server_preflight_lines(runner_lines: list[str]) -> None:
+    """Resolve a usable native llama-server on Windows, or fail closed.
+
+    The POSIX block builds llama.cpp from source; that is wrong on Windows,
+    where Odysseus must not download or replace a runtime. A stale wrapper in
+    ``~/bin`` (a script whose ``exec`` target was deleted) used to be launched
+    because the resolver never ran for local Windows. Now every candidate is
+    validated by running ``--version`` — a broken wrapper is skipped, never
+    executed — and if nothing validates the runner stops with a reason instead
+    of starting a process that cannot work.
+    """
+    _append_llama_server_shim_definition_lines(runner_lines)
+    runner_lines.append('_odysseus_resolve_llama_server || true')
+    runner_lines.append('if [ -n "$_odysseus_llama_bin" ]; then')
+    runner_lines.append('  echo "[odysseus] llama-server: $_odysseus_llama_bin"')
+    runner_lines.append('  hash -r')
+    runner_lines.append('else')
+    runner_lines.append('echo "ERROR: no usable llama-server was found on this Windows host."')
+    runner_lines.append('echo "  Checked every PATH directory (llama-server.exe and llama-server), including"')
+    runner_lines.append('echo "  $HOME/bin and $HOME/llama.cpp/build*/bin. Candidates that did not answer --version"')
+    runner_lines.append('echo "  were rejected - that is a stale wrapper or a broken install."')
+    runner_lines.append('echo "  Fix: choose an existing llama-server.exe in the Cookbook launch dialog, or install"')
+    runner_lines.append('echo "  llama.cpp yourself. Odysseus will not download or replace a runtime for you."')
+    runner_lines.append('ODYSSEUS_PREFLIGHT_EXIT=127')
     runner_lines.append('fi')
 
 

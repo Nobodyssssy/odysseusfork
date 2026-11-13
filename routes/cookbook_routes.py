@@ -67,6 +67,7 @@ from routes.cookbook_helpers import (
     _append_llama_server_shim_definition_lines,
     _append_llama_server_shim_reconciliation_lines,
     _append_llama_server_finalization_lines,
+    _append_windows_llama_server_preflight_lines,
     ModelDownloadRequest, ServeRequest,
 )
 
@@ -1966,6 +1967,12 @@ def setup_cookbook_routes() -> APIRouter:
             handled_ollama_serve = False
             # Auto-install inference engine if missing
             local_windows_llama_cmd = local_windows and ("llama_cpp" in req.cmd or "llama-server" in req.cmd)
+            if local_windows_llama_cmd:
+                # Native Windows: never run the POSIX source-build block. Resolve
+                # and validate an existing executable instead, and fail closed
+                # with a reason when none is usable (a stale ~/bin wrapper must
+                # not be launched).
+                _append_windows_llama_server_preflight_lines(runner_lines)
             if ("llama_cpp" in req.cmd or "llama-server" in req.cmd) and not local_windows_llama_cmd:
                 # Prefer the NATIVE llama-server binary — its minja templating
                 # renders modern GGUF chat templates that the Python bindings'
