@@ -124,20 +124,24 @@ function _nextServeLaunchPort(currentPort, runningMod, host, serverKey) {
   return String(next);
 }
 
-function _readCachedModelScan(sig) {
+function _readCachedModelScan(sig, { allowStale = false } = {}) {
   try {
     const all = JSON.parse(localStorage.getItem(_CACHED_MODELS_SCAN_KEY) || '{}');
     const entry = all[sig];
-    if (entry && Date.now() - (entry.ts || 0) < _CACHED_MODELS_SCAN_TTL) {
-      const data = entry.data || null;
-      const models = Array.isArray(data?.models) ? data.models : [];
-      const staleDownloading = models.some(m =>
-        (m?.status === 'downloading' || m?.has_incomplete) && !_isActivelyDownloading(m?.repo_id)
-      );
-      if (!staleDownloading) return data;
+    if (!entry) return null;
+    const fresh = Date.now() - (entry.ts || 0) < _CACHED_MODELS_SCAN_TTL;
+    if (!fresh && !allowStale) return null;
+    const data = entry.data || null;
+    const models = Array.isArray(data?.models) ? data.models : [];
+    const staleDownloading = models.some(m =>
+      (m?.status === 'downloading' || m?.has_incomplete) && !_isActivelyDownloading(m?.repo_id)
+    );
+    if (staleDownloading) {
       delete all[sig];
       localStorage.setItem(_CACHED_MODELS_SCAN_KEY, JSON.stringify(all));
+      return null;
     }
+    return { data, fresh };
   } catch {}
   return null;
 }
@@ -4321,7 +4325,12 @@ async function _fetchCachedModelsImpl(fresh = false, opts = {}) {
     const params = qp.toString() ? `?${qp}` : '';
     scanSig = params || 'local';
     const hasModelRows = !!list.querySelector('.memory-item[data-repo]');
-    preserveRows = hasModelRows && list.dataset.cookbookScanSig === scanSig;
+    // A persisted scan is rendered immediately — fresh or stale — so the list is
+    // never blocked behind a scan. A stale entry is then refreshed in the
+    // background while the rows stay on screen.
+    const cachedEntry = fresh ? null : _readCachedModelScan(scanSig, { allowStale: true });
+    const cached = cachedEntry?.data || null;
+    preserveRows = !!cached || (hasModelRows && list.dataset.cookbookScanSig === scanSig);
     if (!preserveRows) list.innerHTML = '';
     else list.querySelector('.cookbook-cached-scan-loading')?.remove();
     _dlWrap.classList.toggle('cookbook-cached-scan-loading-inline', preserveRows);
@@ -4332,7 +4341,6 @@ async function _fetchCachedModelsImpl(fresh = false, opts = {}) {
       _dlLabel.textContent = 'Refreshing cached models…';
     }
     list.appendChild(_dlWrap);
-    const cached = fresh ? null : _readCachedModelScan(scanSig);
     if (cached) {
       if (fetchId !== _cachedModelsFetchId) {
         _dlWp.destroy();
@@ -4340,9 +4348,12 @@ async function _fetchCachedModelsImpl(fresh = false, opts = {}) {
         return;
       }
       _dlWp.destroy();
+      _dlWrap.remove();
       list.dataset.cookbookScanSig = scanSig;
       _renderCachedModelsData(list, cached, host);
-      return;
+      if (cachedEntry.fresh) return;
+      // Stale: rows stay visible; the scan below refreshes them silently.
+      preserveRows = true;
     }
     if (!allowNetwork) {
       if (fetchId !== _cachedModelsFetchId) {
