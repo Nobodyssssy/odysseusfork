@@ -1101,11 +1101,12 @@ function _winPidStopTreePs(sid, dirExpr) {
     + `$p = Get-Content (Join-Path ${dirExpr} '${sid}.pid') -ErrorAction SilentlyContinue; `
     + `if ($p -match '^\\d+$') { `
     + `$t = Get-Content (Join-Path ${dirExpr} '${sid}.pid.token') -ErrorAction SilentlyContinue; `
-    + `if ($t -match '^win32:(\\d+)$') { `
+    + `if (-not $t) { Write-Output 'UNVERIFIED'; exit 0 }; `
+    + `if ($t -notmatch '^win32:(\\d+)$') { Write-Output 'UNVERIFIED'; exit 0 }; `
     + `$proc = Get-Process -Id ([int]$p) -ErrorAction SilentlyContinue; `
     + `if (-not $proc) { exit 0 }; `
-    + `if ($proc.StartTime.ToUniversalTime() -ne [datetime]::FromFileTimeUtc([uint64]$matches[1]).ToUniversalTime()) { exit 0 } `
-    + `}; Stop-Tree ([int]$p) }; `;
+    + `if ($proc.StartTime.ToUniversalTime() -ne [datetime]::FromFileTimeUtc([uint64]$matches[1]).ToUniversalTime()) { Write-Output 'RECYCLED'; exit 0 }; `
+    + `Stop-Tree ([int]$p) }; `;
 }
 
 function _winSessionStopTreePs(task) {

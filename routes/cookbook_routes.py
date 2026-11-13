@@ -184,6 +184,29 @@ def _set_task_status(session_id: str, status: str, *, stamp: bool = False) -> di
     return _apply()
 
 
+def _local_pid_state(pid, session_id: str) -> str:
+    """Ownership of ``pid`` for a detached local-Windows task.
+
+    Returns ``owned`` (a recorded identity matches), ``dead`` (no such process),
+    ``unverifiable`` (alive, but nothing recorded to prove it is ours) or
+    ``recycled`` (alive, and the recorded identity belongs to a different
+    process). The distinction between the last two is the whole point: a
+    recycled pid must never be reported as our running task, and an
+    unverifiable one must never be signalled.
+    """
+    if not pid_alive(pid):
+        return "dead"
+    try:
+        token = (TMUX_LOG_DIR / f"{session_id}.pid.token").read_text(encoding="utf-8").strip()
+    except OSError:
+        return "unverifiable"
+    if not token:
+        return "unverifiable"
+    from src.process_ownership import OWNED, verify
+
+    return "owned" if verify(pid, token) == OWNED else "recycled"
+
+
 def _local_probe_python() -> str:
     """Interpreter for the in-process cache probes (never a bare ``python3``).
 
@@ -4210,6 +4233,7 @@ def setup_cookbook_routes() -> APIRouter:
             full_snapshot = (task.get("output") or "")[-12000:] if task_type == "serve" else ""
             _persisted_terminal = False
 
+            _pid_unverifiable = False
             if local_win_task:
                 # File-based liveness + output for the detached-process model.
                 pid_path = TMUX_LOG_DIR / f"{session_id}.pid"
@@ -4219,7 +4243,9 @@ def setup_cookbook_routes() -> APIRouter:
                     task_pid = int(pid_path.read_text(encoding="utf-8").strip())
                 except Exception:
                     task_pid = None
-                is_alive = _local_pid_is_owned(task_pid, session_id)
+                _pid_state = _local_pid_state(task_pid, session_id)
+                is_alive = _pid_state == "owned"
+                _pid_unverifiable = _pid_state in {"unverifiable", "recycled"}
                 try:
                     if log_path.exists():
                         full_snapshot = log_path.read_text(
@@ -4291,6 +4317,27 @@ def setup_cookbook_routes() -> APIRouter:
                     "phase": "",
                     "diagnosis": "",
                     "output_tail": error_aware_output_tail(full_snapshot, _cancel_status),
+                    "exit_code": None,
+                    "cmd": _payload.get("_cmd") or "",
+                    "tps": None,
+                    "reqs": None,
+                    "pct": None,
+                    "remote": remote or "local",
+                })
+                continue
+            # A live pid with no matching identity cannot be claimed as ours.
+            # Report it rather than letting the UI describe it as running or
+            # stopped — neither would be true.
+            if _pid_unverifiable:
+                results.append({
+                    "session_id": session_id,
+                    "type": task_type,
+                    "model": model.split("/")[-1] if "/" in model else model,
+                    "status": "unverifiable",
+                    "progress": progress_text[:120],
+                    "phase": "",
+                    "diagnosis": "",
+                    "output_tail": error_aware_output_tail(full_snapshot, "unverifiable"),
                     "exit_code": None,
                     "cmd": _payload.get("_cmd") or "",
                     "tps": None,

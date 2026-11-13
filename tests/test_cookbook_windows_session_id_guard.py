@@ -126,4 +126,4 @@ def test_stop_path_verifies_the_recorded_process_identity():
     # The guard runs BEFORE the tree kill, and a mismatch exits without signalling.
     guard = source.index("[datetime]::FromFileTimeUtc([uint64]$matches[1])")
     kill = source.index("Stop-Tree ([int]$p) }; ", guard)
-    assert "exit 0 } " in source[guard:kill]
+    assert "exit 0 }" in source[guard:kill]
