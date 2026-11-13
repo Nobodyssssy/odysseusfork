@@ -20,10 +20,11 @@ def test_cancel_request_helper_targets_the_new_endpoint():
     assert "async function _requestTaskCancel(task)" in source
     assert "'/api/cookbook/tasks/cancel'" in source
     assert "body: JSON.stringify({ session_id: sid })" in source
-    # Best-effort: a failed write must not abort the kill that follows.
+    # Best-effort: a failed write must not abort the kill that follows, but the
+    # handler is told so it can refuse to claim a successful stop.
     start = source.index("async function _requestTaskCancel")
-    end = source.index("\nfunction ", start)
-    assert "try {" in source[start:end] and "} catch {}" in source[start:end]
+    end = source.index("function _restoreRunningBadge", start)
+    assert "try {" in source[start:end] and "catch { return false; }" in source[start:end]
 
 
 def test_cancel_helper_refuses_an_unsafe_session_id():
@@ -32,7 +33,7 @@ def test_cancel_helper_refuses_an_unsafe_session_id():
     end = source.index("\nfunction ", start)
     body = source[start:end]
     assert "const sid = _safeSessionId(task);" in body
-    assert "if (!sid) return;" in body
+    assert "if (!sid) return false;" in body
 
 
 def test_stop_and_kill_handlers_record_the_cancellation():

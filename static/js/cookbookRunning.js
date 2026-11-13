@@ -1040,14 +1040,27 @@ export function _safeSessionId(task) {
 // from liveness as it did before.
 async function _requestTaskCancel(task) {
   const sid = _safeSessionId(task);
-  if (!sid) return;
+  if (!sid) return false;
   try {
-    await _fetchWithTimeout('/api/cookbook/tasks/cancel', {
+    const r = await _fetchWithTimeout('/api/cookbook/tasks/cancel', {
       method: 'POST', credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ session_id: sid }),
     });
-  } catch {}
+    if (!r.ok) return false;
+    const body = await r.json().catch(() => null);
+    return !!(body && body.ok);
+  } catch { return false; }
+}
+
+// Put a refused/failed stop back to a visible running state instead of letting
+// the row claim it stopped.
+function _restoreRunningBadge(el, badge, task) {
+  el.dataset.status = 'running';
+  if (badge) {
+    badge.textContent = _statusLabel('running', task.type);
+    badge.className = 'cookbook-task-status cookbook-task-running';
+  }
 }
 
 function _winSessionCmd(task, tmuxArgs) {
@@ -2988,7 +3001,16 @@ export function _renderRunningTab() {
       if (badge) { badge.textContent = 'stopping...'; badge.className = 'cookbook-task-status cookbook-task-stopping'; }
       el.dataset.status = 'stopped';
       _updateTask(task.sessionId, { _userStopped: true });
-      await _requestTaskCancel(task);
+      // Record the cancellation before signalling anything. If the record could
+      // not be written, say so and keep the row: without it the poller (or
+      // another device, or a page reload) still sees the task as running.
+      const recorded = await _requestTaskCancel(task);
+      if (!recorded) {
+        try { uiModule.showToast('Stop could not be recorded on the server — the task may still be running.', 'error'); } catch {}
+        _restoreRunningBadge(el, badge, task);
+        _updateTask(task.sessionId, { _userStopped: false });
+        return;
+      }
       const outputText = el.querySelector('.cookbook-output-pre')?.textContent || task.output || '';
       // Drop the model endpoint so the picker stops listing it.
       if (task.type === 'serve' && task.payload) {
@@ -3004,14 +3026,42 @@ export function _renderRunningTab() {
           });
         } catch {}
       }
-      // Gracefully stop (C-c, then kill the session) so it's fully down...
+      // Gracefully stop (C-c, then kill the session) so it's fully down. The
+      // outcome is checked: a refused or failed kill must never look like a
+      // successful stop.
+      let stopOk = true;
+      let stopNote = '';
       try {
-        await _fetchWithTimeout('/api/shell/exec', {
+        const r = await _fetchWithTimeout('/api/shell/exec', {
           method: 'POST', credentials: 'same-origin',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ command: _tmuxGracefulKill(task) }),
         });
-      } catch {}
+        if (r.ok) {
+          const out = await r.json().catch(() => null);
+          const text = `${(out && out.stdout) || ''}\n${(out && out.stderr) || ''}`;
+          if (/UNVERIFIED/i.test(text)) stopNote = 'unverified';
+          else if (/RECYCLED/i.test(text)) stopNote = 'recycled';
+          if (out && (out.exit_code || 0) !== 0) stopOk = false;
+        } else {
+          stopOk = false;
+        }
+      } catch { stopOk = false; }
+      if (stopNote) {
+        // The server refused to signal an unverified or recycled pid. Say why
+        // Stop could not proceed rather than dropping the row silently.
+        const msg = stopNote === 'unverified'
+          ? 'Stop refused: this task has no recorded process identity, so the server will not signal its pid (it may have been recycled). Stop it manually or restart Odysseus and use the new task.'
+          : 'Stop refused: the recorded pid now belongs to a different process, so it was left alone.';
+        try { uiModule.showToast(msg, 'error'); } catch {}
+        _restoreRunningBadge(el, badge, task);
+        return;
+      }
+      if (!stopOk) {
+        try { uiModule.showToast('Stop failed — the task may still be running.', 'error'); } catch {}
+        _restoreRunningBadge(el, badge, task);
+        return;
+      }
       // ...then smoothly fade/slide the card out and auto-remove it — no manual
       // ⋮ → Remove needed.
       _animateOutThenRemove(el, task.sessionId);
@@ -3023,7 +3073,7 @@ export function _renderRunningTab() {
     // already exited) silently left the live serve running while the
     // row disappeared from the UI.
     el.querySelector('.cookbook-task-action-kill').addEventListener('click', async () => {
-      await _requestTaskCancel(task);
+      const recorded = await _requestTaskCancel(task);
       const outputText = el.querySelector('.cookbook-output-pre')?.textContent || task.output || '';
       const isLive = task.type === 'serve' && ['running', 'ready', 'loading', 'warming', 'starting'].includes(task.status || '');
       const ollamaUnload = _ollamaUnloadCommand(task, outputText);
@@ -3081,6 +3131,9 @@ export function _renderRunningTab() {
               if (ep) _fetchWithTimeout(`/api/model-endpoints/${ep.id}`, { method: 'DELETE', credentials: 'same-origin' }).then(() => _refreshModelsAfterEndpointChange());
             }).catch(() => {});
         }
+      }
+      if (!recorded) {
+        try { uiModule.showToast('Stopped, but the cancellation could not be recorded on the server — it may reappear after a refresh.', 'error'); } catch {}
       }
       _animateOutThenRemove(el, task.sessionId);
     });

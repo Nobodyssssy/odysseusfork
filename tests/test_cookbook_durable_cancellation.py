@@ -97,6 +97,22 @@ async def test_cancel_persists_and_is_idempotent(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_cancel_keeps_the_admin_gate(monkeypatch, tmp_path):
+    """The new mutating endpoint must not be reachable anonymously."""
+    monkeypatch.setenv("AUTH_ENABLED", "true")
+    monkeypatch.setattr(routes, "_COOKBOOK_STATE_PATH", _state_file(tmp_path))
+    monkeypatch.setattr(routes, "TMUX_LOG_DIR", tmp_path)
+    _write_state(_state_file(tmp_path), [_task()])
+    app = FastAPI()
+    app.include_router(routes.setup_cookbook_routes())
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/api/cookbook/tasks/cancel", json={"session_id": "serve-cancel1"})
+    assert response.status_code == 403
+    # And an invalid id is still rejected before any state is touched.
+    assert json.loads(_state_file(tmp_path).read_text(encoding="utf-8"))["tasks"][0]["status"] == "running"
+
+
+@pytest.mark.asyncio
 async def test_cancel_survives_a_reloaded_state(monkeypatch, tmp_path):
     """The state file is the record: a fresh router sees the cancellation."""
     app = _app(monkeypatch, tmp_path)
