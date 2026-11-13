@@ -126,3 +126,8 @@ class TestStart:
         foreign.write_text('// theirs', encoding='utf-8')
         assert self.run_start(manager, config) == {'state': 'ready'}
         assert foreign.read_text() == '// theirs' and any('left unchanged' in a for a in manager.last_actions)
+
+
+def test_the_first_deployed_resume_plugin_digests_are_listed_for_in_place_upgrade():
+    from src.hermes_webapp_component import KNOWN_PREVIOUS_RESUME_SHA256
+    assert KNOWN_PREVIOUS_RESUME_SHA256[1].startswith('596d5f44b76d') and KNOWN_PREVIOUS_RESUME_SHA256[0].startswith('71c3a1ff23b1')   # sha256 of cdc287ad's plugin, LF and CRLF

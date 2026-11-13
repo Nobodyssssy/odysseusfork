@@ -35,7 +35,10 @@ from src.hermes_component import (ComponentError, SourcePin, atomic_bytes, atomi
 ORIGINS = ('managed', 'adopted')
 PLUGIN_NAME = 'odysseus-return'
 RESUME_PLUGIN_NAME = 'odysseus-resume'
-KNOWN_PREVIOUS_RESUME_SHA256 = ()          # earlier shipped copies of the resume plugin that may be upgraded in place (none yet)
+KNOWN_PREVIOUS_RESUME_SHA256 = (            # earlier shipped copies of the resume plugin that may be upgraded in place (first deployment: CRLF and LF forms)
+    '71c3a1ff23b12020c0de2f3d5fa097f67d61d4f0a1f73a35e0a864b46b5727e4',
+    '596d5f44b76d532148bcf9bc536852d7f37f0225099658752a04e20f8e8814b0',
+)
 WORKSPACE_GRANTS_PLUGIN = 'odysseus-workspace-grants'
 WORKSPACE_GRANTS_PLUGIN_SOURCE = 'integrations/hermes-mode/plugins/odysseus-workspace-grants'
 KNOWN_PREVIOUS_PLUGIN_SHA256 = ('f72f51dabc67c4c99f40aca182ac66546220c678e5341020c95c3e73536d1760',

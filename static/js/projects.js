@@ -78,6 +78,7 @@ function visibleProjects() {
 // The grant exchange needs a Referer from this origin, and Odysseus sends Referrer-Policy: no-referrer on every page, so this one link
 // opts in to sending the origin (never the path) to the page it points at: the same pattern as the Odysseus mode selector.
 function follow(href) {
+  if (cameFromHermes()) { location.replace(href); return; }   // same tab: this page leaves the history, so Back from Hermes returns to where the user was
   const link = document.createElement('a');
   link.href = href;
   link.target = '_blank';
@@ -99,6 +100,14 @@ function returnConversation() {
   try { const kept = sessionStorage.getItem('projects-return'); return kept && RETURN_ID.test(kept) ? kept : ''; } catch (e) { return ''; }
 }
 
+// ?via=hermes is added by the HermesGUI sidebar entry. It only decides new tab or same tab for links that are this page's own launch exchange.
+function cameFromHermes() {
+  try {
+    if (new URLSearchParams(location.search).get('via') === 'hermes') sessionStorage.setItem('projects-via', 'hermes');
+    return sessionStorage.getItem('projects-via') === 'hermes';
+  } catch (e) { return false; }
+}
+
 async function openProjects(resume) {
   try {
     const response = await fetch('/api/application-modes/projects/launch' + (resume ? '?resume=' + encodeURIComponent(resume) : ''), { method: 'POST', credentials: 'same-origin' });
@@ -117,7 +126,8 @@ function wireHermesButton() {
   const button = $('toHermes');
   if (!button) return;
   const id = returnConversation();
-  button.title = id ? 'Return to the Hermes conversation you came from (opens in a new tab, signed in)' : 'Open HermesGUI in a new tab (signed in)';
+  const where = cameFromHermes() ? 'in this tab' : 'in a new tab';
+  button.title = id ? 'Return to the Hermes conversation you came from (' + where + ', signed in)' : 'Open HermesGUI (' + where + ', signed in)';
   button.onclick = () => openProjects(id);
 }
 
