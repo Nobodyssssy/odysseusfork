@@ -74,11 +74,22 @@ function visibleProjects() {
   });
 }
 
+async function openProjects() {
+  try {
+    const response = await fetch('/api/application-modes/projects/launch', { method: 'POST', credentials: 'same-origin' });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok || !body.url) throw new Error(body.detail || 'Projects could not be opened (' + response.status + ')');
+    window.open(body.url, '_blank', 'noopener');
+    toast('Opened Projects; Resume links work in this browser afterwards');
+  } catch (error) { toast(error.message); }
+}
+
 function renderEngines() {
   const o = store.overview;
   $('engines').replaceChildren(...(o ? [
     h('span', { title: 'Managed Hermes gateway (Webapp), from its heartbeat record' }, 'Gateway: ' + (o.gateway_live ? 'running' : 'stopped')),
     h('span', { title: 'Legacy Hermes WebUI port' }, 'WebUI: ' + (o.webui_live ? 'running' : 'stopped')),
+    h('button', { type: 'button', title: 'Signs this browser in to the Hermes Webapp so Resume links work', onclick: openProjects }, 'Open Projects'),
   ] : []));
 }
 
@@ -119,7 +130,7 @@ function renderList() {
 
 function sessionRow(s, showProject) {
   const link = s.resume_url
-    ? h('a', { href: s.resume_url, target: '_blank', rel: 'noopener', title: s.source === 'webui' ? 'Opens in the legacy WebUI (must be running)' : 'Opens in the Projects Webapp (sign-in comes from this Odysseus session)' }, 'Resume')
+    ? h('a', { href: s.resume_url, target: '_blank', rel: 'noopener', title: s.source === 'webui' ? 'Opens in the legacy WebUI (must be running and signed in)' : 'Opens in the Projects Webapp. If it answers 401, press Open Projects (top right) once to sign this browser in.' }, 'Resume')
     : null;
   return h('tr', null,
     h('td', null, stateBadge(s.state, s.evidence)),
