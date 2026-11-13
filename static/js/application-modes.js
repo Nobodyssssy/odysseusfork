@@ -250,6 +250,12 @@ async function initialize() {
   providers.textContent = 'Providers';
   providers.title = 'Shared Odysseus and Hermes providers';
   providers.style.cssText = 'margin-left:8px;color:inherit';
+  const dashboard = document.createElement('a');
+  dashboard.id = 'application-mode-dashboard';
+  dashboard.href = '/static/projects.html';
+  dashboard.textContent = 'Dashboard';
+  dashboard.title = 'Projects dashboard: projects, conversations, worktrees, access and handoffs';
+  dashboard.style.cssText = 'margin-left:8px;color:inherit';
   const rememberPage = () => { providers.href = '/static/provider-sync.html?return=' + encodeURIComponent(location.pathname + location.search + location.hash); };
   for (const type of ['pointerenter', 'focus', 'click', 'auxclick']) providers.addEventListener(type, rememberPage);
   const services = serviceMenu(status, message);
@@ -272,7 +278,7 @@ async function initialize() {
   newTab.textContent = 'Open Projects in new tab';
   newTab.title = 'Keep Personal here and open Projects in another tab';
   newTab.style.cssText = 'margin-left:8px;color:inherit;font-size:.85em;opacity:.75;white-space:nowrap';
-  bar.append(selector, ...(gateway ? [] : [providers]), ...(services ? [services] : []), ...(gateway ? [health, newTab] : []), message);
+  bar.append(selector, ...(gateway ? [] : [dashboard, providers]), ...(services ? [services] : []), ...(gateway ? [health, newTab] : []), message);
   document.querySelector('#chat-container').prepend(bar);
   try { await restoreChatState(message); }
   catch (_) { message.textContent = 'The saved draft could not be restored. Your current composer was not changed.'; }

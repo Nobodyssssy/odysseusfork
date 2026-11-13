@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Projects - Odysseus and Hermes</title>
+<link rel="stylesheet" href="/static/css/projects.css">
+</head>
+<body>
+<header class="bar">
+  <a id="back" href="/" class="back" title="Back to Odysseus">&larr; Odysseus</a>
+  <h1>Projects</h1>
+  <input id="search" type="search" placeholder="Search projects, branches, paths  ( / )" aria-label="Search projects" autocomplete="off">
+  <div id="filters" role="group" aria-label="Filter projects"></div>
+  <span class="spacer"></span>
+  <span id="engines" aria-live="polite"></span>
+  <button id="refresh" type="button" title="Reload (r)">Refresh</button>
+</header>
+<div class="layout">
+  <nav id="list" aria-label="Projects" tabindex="-1"></nav>
+  <main id="detail" aria-live="polite" tabindex="-1"><p class="empty">Loading projects&hellip;</p></main>
+</div>
+<div id="toast" role="status"></div>
+<script type="module" src="/static/js/projects.js"></script>
+</body>
+</html>

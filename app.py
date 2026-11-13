@@ -839,6 +839,11 @@ from src.provider_sync_runtime import create_provider_sync
 app.state.provider_sync = create_provider_sync(invalidate=_model_router._invalidate_models_cache)
 app.include_router(make_provider_sync_router(lambda: app.state.provider_sync))
 
+# Projects dashboard: read-only join of existing Hermes/Odysseus records (admin-only, loopback-only).
+from routes.projects_dashboard_routes import make_projects_dashboard_router
+from src.projects_dashboard import from_environment as _projects_dashboard_from_environment
+app.include_router(make_projects_dashboard_router(lambda: _projects_dashboard_from_environment()))
+
 # GitHub Copilot device-flow login
 from routes.copilot_routes import setup_copilot_routes
 app.include_router(setup_copilot_routes())
