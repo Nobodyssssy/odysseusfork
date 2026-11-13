@@ -1022,10 +1022,22 @@ export function _tmuxCmd(task, tmuxArgs) {
   return `tmux ${tmuxArgs} 2>/dev/null`;
 }
 
+// Session ids are minted by the backend as cookbook-<hex> / serve-<hex> /
+// queue-<hex> and validated there by _SESSION_ID_RE. They are interpolated
+// into PowerShell and shell commands below, so an id from a synced state file
+// that is outside that shape is refused rather than escaped: a crafted id
+// otherwise breaks out of the quoted literal and runs arbitrary PowerShell.
+const _SESSION_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+function _safeSessionId(task) {
+  const sid = String(task?.sessionId ?? '');
+  return _SESSION_ID_RE.test(sid) ? sid : '';
+}
+
 function _winSessionCmd(task, tmuxArgs) {
   const host = _taskRemoteHost(task);
   const sd = host ? '$env:TEMP\\odysseus-sessions' : '$env:TEMP\\odysseus-tmux';
-  const sid = task.sessionId;
+  const sid = _safeSessionId(task);
+  if (!sid) return '';
   const pf = _sshPrefix(_getPort(task));
   if (tmuxArgs.includes('capture-pane')) {
     const lines = tmuxArgs.match(/-S\s*-?(\d+)/)?.[1] || '200';
@@ -1063,7 +1075,8 @@ function _winPowerShellCmd(task, ps) {
 function _winSessionStopTreePs(task) {
   const host = _taskRemoteHost(task);
   const sd = host ? '$env:TEMP\\odysseus-sessions' : '$env:TEMP\\odysseus-tmux';
-  const sid = task.sessionId;
+  const sid = _safeSessionId(task);
+  if (!sid) return '';
   const stopTree = `function Stop-Tree([int]$Id) { Get-CimInstance Win32_Process -Filter ('ParentProcessId = ' + $Id) -ErrorAction SilentlyContinue | ForEach-Object { Stop-Tree ([int]$_.ProcessId) }; Stop-Process -Id $Id -Force -ErrorAction SilentlyContinue }`;
   return host
     ? `${stopTree}; $p = Get-Content '${sd}\\${sid}.pid' -ErrorAction SilentlyContinue; if ($p -match '^\\d+$') { Stop-Tree ([int]$p) }; Remove-Item '${sd}\\${sid}.*' -Force -ErrorAction SilentlyContinue`
@@ -1075,11 +1088,13 @@ export function _tmuxGracefulKill(task) {
     const ps = _winSessionStopTreePs(task);
     return _winPowerShellCmd(task, ps);
   }
+  const sid = _safeSessionId(task);
+  if (!sid) return '';
   const host = _taskRemoteHost(task);
   if (host) {
-    return `ssh ${_sshPrefix(_getPort(task))}${host} '${_remoteTmuxPrefix()}tmux send-keys -t ${task.sessionId} C-c 2>/dev/null; sleep 2; tmux kill-session -t ${task.sessionId} 2>/dev/null'`;
+    return `ssh ${_sshPrefix(_getPort(task))}${host} '${_remoteTmuxPrefix()}tmux send-keys -t ${sid} C-c 2>/dev/null; sleep 2; tmux kill-session -t ${sid} 2>/dev/null'`;
   }
-  return `tmux send-keys -t ${task.sessionId} C-c 2>/dev/null; sleep 2; tmux kill-session -t ${task.sessionId} 2>/dev/null`;
+  return `tmux send-keys -t ${sid} C-c 2>/dev/null; sleep 2; tmux kill-session -t ${sid} 2>/dev/null`;
 }
 
 // Force-kill escalation: SIGKILL the tmux pane's owning PID and any children,
@@ -1092,7 +1107,8 @@ export function _tmuxForceKill(task) {
     // command serves as the "force" variant.
     return _tmuxGracefulKill(task);
   }
-  const sid = task.sessionId;
+  const sid = _safeSessionId(task);
+  if (!sid) return '';
   const inner =
     `PIDS=$(tmux list-panes -t ${sid} -F "#{pane_pid}" 2>/dev/null); ` +
     `if [ -n "$PIDS" ]; then ` +
@@ -1117,7 +1133,8 @@ export function _tmuxIsAliveCheck(task) {
     // Skip the check on Windows — the graceful path already force-kills.
     return null;
   }
-  const sid = task.sessionId;
+  const sid = _safeSessionId(task);
+  if (!sid) return '';
   const inner = `if tmux has-session -t ${sid} 2>/dev/null; then echo ALIVE; else echo DEAD; fi`;
   const host = _taskRemoteHost(task);
   if (host) {
@@ -2579,7 +2596,7 @@ export function _renderRunningTab() {
           _fetchWithTimeout('/api/shell/exec', {
             method: 'POST', credentials: 'same-origin',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ command: _tmuxCmd(task, `kill-session -t ${task.sessionId}`) }),
+            body: JSON.stringify({ command: _tmuxCmd(task, `kill-session -t ${_safeSessionId(task)}`) }),
           }).catch(() => {});
         } catch {}
         _animateOutThenRemove(el, task.sessionId);
@@ -2752,15 +2769,16 @@ export function _renderRunningTab() {
         if (_isWindows(task)) {
           const host = task.remoteHost;
           const sd = host ? '$env:TEMP\\odysseus-sessions' : '$env:TEMP\\odysseus-tmux';
-          const logCmd = host
-            ? `ssh ${_sshPrefix(_getPort(task))}${host} "powershell -Command \\"Get-Content '${sd}\\${task.sessionId}.log' -Wait\\""`
-            : `powershell -Command "Get-Content (Join-Path $env:TEMP 'odysseus-tmux\\${task.sessionId}.log') -Wait"`;
+          const sid = _safeSessionId(task);
+          const logCmd = sid ? (host
+            ? `ssh ${_sshPrefix(_getPort(task))}${host} "powershell -Command \\"Get-Content '${sd}\\${sid}.log' -Wait\\""`
+            : `powershell -Command "Get-Content (Join-Path $env:TEMP 'odysseus-tmux\\${sid}.log') -Wait"`) : '';
           items.push({ group: 'copy', label: 'Copy log cmd', action: 'copy-tmux', custom: () => {
             _copyText(logCmd);
           }});
         } else {
           // Just the tmux command itself — no ssh wrapper.
-          const tmuxAttach = `tmux attach -t ${task.sessionId}`;
+          const tmuxAttach = `tmux attach -t ${_safeSessionId(task)}`;
           items.push({ group: 'copy', label: 'Copy tmux', action: 'copy-tmux', custom: () => {
             _copyText(tmuxAttach);
           }});
@@ -2995,7 +3013,7 @@ export function _renderRunningTab() {
               const probe = await _fetchWithTimeout('/api/shell/exec', {
                 method: 'POST', credentials: 'same-origin',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ command: _tmuxCmd(task, `has-session -t ${task.sessionId}`) }),
+                body: JSON.stringify({ command: _tmuxCmd(task, `has-session -t ${_safeSessionId(task)}`) }),
               });
               if (probe.ok) {
                 const pj = await probe.json();
@@ -3114,7 +3132,7 @@ async function _reconnectTask(el, task) {
       const res = await _fetchWithTimeout('/api/shell/exec', {
         method: 'POST', credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ command: _tmuxCmd(task, `capture-pane -t ${task.sessionId} -p -S -500`), timeout: 15 }),
+        body: JSON.stringify({ command: _tmuxCmd(task, `capture-pane -t ${_safeSessionId(task)} -p -S -500`), timeout: 15 }),
       });
       const data = await res.json();
 
@@ -3128,7 +3146,7 @@ async function _reconnectTask(el, task) {
           const verify = await _fetchWithTimeout('/api/shell/exec', {
             method: 'POST', credentials: 'same-origin',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ command: _tmuxCmd(task, `has-session -t ${task.sessionId}`) }),
+            body: JSON.stringify({ command: _tmuxCmd(task, `has-session -t ${_safeSessionId(task)}`) }),
           });
           const vData = await verify.json();
           if (vData.exit_code === 0) {
@@ -3327,7 +3345,7 @@ async function _reconnectTask(el, task) {
                     const probe = await _fetchWithTimeout('/api/shell/exec', {
                       method: 'POST', credentials: 'same-origin',
                       headers: { 'Content-Type': 'application/json' },
-                      body: JSON.stringify({ command: _tmuxCmd(task, `has-session -t ${task.sessionId}`), timeout: 5 }),
+                      body: JSON.stringify({ command: _tmuxCmd(task, `has-session -t ${_safeSessionId(task)}`), timeout: 5 }),
                     });
                     const pData = await probe.json();
                     stillAlive = pData.exit_code === 0;
@@ -3445,7 +3463,7 @@ async function _reconnectTask(el, task) {
                 await _fetchWithTimeout('/api/shell/exec', {
                   method: 'POST', credentials: 'same-origin',
                   headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ command: _tmuxCmd(task, `kill-session -t ${task.sessionId}`) }),
+                  body: JSON.stringify({ command: _tmuxCmd(task, `kill-session -t ${_safeSessionId(task)}`) }),
                 });
               } catch {}
               try {
@@ -3560,7 +3578,7 @@ async function _reconnectTask(el, task) {
                   await _fetchWithTimeout('/api/shell/exec', {
                     method: 'POST', credentials: 'same-origin',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ command: _tmuxCmd(task, `kill-session -t ${task.sessionId}`) }),
+                    body: JSON.stringify({ command: _tmuxCmd(task, `kill-session -t ${_safeSessionId(task)}`) }),
                   });
                 } catch {}
                 _removeTask(task.sessionId);
@@ -3602,7 +3620,7 @@ async function _reconnectTask(el, task) {
               _fetchWithTimeout('/api/shell/exec', {
                 method: 'POST', credentials: 'same-origin',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ command: _tmuxCmd(task, `kill-session -t ${task.sessionId}`) }),
+                body: JSON.stringify({ command: _tmuxCmd(task, `kill-session -t ${_safeSessionId(task)}`) }),
               }).catch(() => {});
               _processQueue();
               break;

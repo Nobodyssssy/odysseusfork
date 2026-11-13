@@ -1,0 +1,75 @@
+"""A session id must never reach a shell/PowerShell command unvalidated.
+
+The Windows stop path interpolates ``task.sessionId`` into a PowerShell command
+that ends with ``Remove-Item -Force``. A crafted id (from a synced cookbook
+state file) closes the single-quoted literal and runs arbitrary PowerShell —
+verified against a real ``powershell -Command`` with a benign payload. The
+backend mints ids as cookbook-<hex>/serve-<hex>/queue-<hex> and validates them
+with _SESSION_ID_RE; the command builders must apply the same shape.
+"""
+from pathlib import Path
+
+
+SOURCE = Path(__file__).resolve().parents[1] / "static" / "js" / "cookbookRunning.js"
+
+
+def _source() -> str:
+    return SOURCE.read_text(encoding="utf-8")
+
+
+def test_session_id_guard_matches_the_backend_shape():
+    source = _source()
+    # Mirrors routes/cookbook_helpers.py::_SESSION_ID_RE
+    assert "const _SESSION_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;" in source
+    assert "function _safeSessionId(task)" in source
+    # Refuse, don't escape: an id outside the shape yields no command.
+    assert "return _SESSION_ID_RE.test(sid) ? sid : '';" in source
+
+
+def test_every_command_builder_obtains_the_id_through_the_guard():
+    source = _source()
+    builders = (
+        "function _winSessionCmd(task, tmuxArgs)",
+        "function _winSessionStopTreePs(task)",
+        "export function _tmuxForceKill(task)",
+        "export function _tmuxIsAliveCheck(task)",
+        "export function _tmuxGracefulKill(task)",
+    )
+    for builder in builders:
+        start = source.index(builder)
+        # The next function boundary delimits the body.
+        end = source.find("\nfunction ", start + len(builder))
+        end2 = source.find("\nexport function ", start + len(builder))
+        ends = [e for e in (end, end2) if e != -1]
+        body = source[start:min(ends) if ends else len(source)]
+        assert "_safeSessionId(task)" in body, f"{builder} builds a command without the guard"
+        assert "if (!sid) return '';" in body, f"{builder} does not fail closed on an unsafe id"
+
+
+def test_no_command_string_interpolates_the_raw_session_id():
+    """`${task.sessionId}` may only appear where it is not a command.
+
+    Allowed: DOM selectors and JS state keys. Refused: anything handed to a
+    shell/PowerShell builder.
+    """
+    import re
+
+    source = _source()
+    for match in re.finditer(r"\$\{task\.sessionId\}", source):
+        line = source[:match.start()].count(chr(10)) + 1
+        text = source.splitlines()[line - 1]
+        allowed = ("querySelector" in text or "data-task-id" in text
+                   or "_updateTask(" in text or "_removeTask(" in text
+                   or "existingIds" in text or "el.dataset" in text
+                   or "_animateOutThenRemove" in text)
+        assert allowed, f"line {line} interpolates the raw id into a command: {text.strip()}"
+
+
+def test_guard_rejects_the_verified_escape_payload():
+    """The exact payload that escaped in live PowerShell must now be refused."""
+    import re
+
+    payload = "x') ; Set-Content -Path 'C:\marker.txt' -Value escaped ; #"
+    assert not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", payload)
+    for benign in ("cookbook-abc12345", "serve-deadbeef", "queue-1a2b3c4d_x-y"):
+        assert re.fullmatch(r"[A-Za-z0-9_-]{1,64}", benign)
