@@ -221,3 +221,121 @@ def test_router_enforces_the_guard():
     client = TestClient(app)
     for path in ('/api/projects-dashboard', '/api/projects-dashboard/sessions', '/api/projects-dashboard/project/x'):
         assert client.get(path).status_code == 403
+
+
+@needs_git
+class TestHardening:
+    def test_malicious_repo_config_is_not_executed_by_status(self, tmp_path):
+        repo = tmp_path / 'evil'
+        repo.mkdir()
+        run_git(repo, 'init', '-q', '-b', 'main')
+        marker = tmp_path / 'ran.txt'
+        script = tmp_path / 'hook.cmd' if os.name == 'nt' else tmp_path / 'hook.sh'
+        script.write_text('@echo off\r\necho x> "%s"\r\n' % marker if os.name == 'nt' else '#!/bin/sh\necho x > "%s"\n' % marker)
+        script.chmod(0o755)
+        run_git(repo, 'config', 'core.fsmonitor', str(script))
+        out = pd._git(repo, 'status', '--porcelain=v1', '-b')
+        assert out is not None and not marker.exists()
+
+    def test_project_id_must_be_ten_hex_characters(self, world):
+        dash, *_ = world
+        for bad in ('../../etc', '8f96158581/../x', '', 'ZZZZZZZZZZ', 'a' * 11, '-C', '8f96158581' + chr(10)):
+            assert dash.detail(bad, NOW) is None
+
+    def test_get_never_runs_with_a_caller_supplied_path(self, world):
+        dash, *_ = world
+        import inspect
+        assert 'path' not in inspect.signature(dash.detail).parameters and 'path' not in inspect.signature(dash.overview).parameters
+
+
+class TestSessionsMerge:
+    def test_migrated_conversation_is_listed_once_and_resumes_in_the_webapp(self, tmp_path):
+        home, webui = tmp_path / 'home', tmp_path / 'webui'
+        (webui / 'sessions').mkdir(parents=True)
+        (webui / 'sessions' / '_index.json').write_text(json.dumps([
+            {'session_id': 'both', 'title': 'Chosen title', 'workspace': r'E:\Project\X', 'updated_at': NOW - 500},
+            {'session_id': 'legacy', 'title': 'Only here', 'workspace': r'E:\Project\X', 'updated_at': NOW - 400}]))
+        gateway_db(home, sessions=[{'id': 'both', 'title': 'Gateway title', 'cwd': r'C:\Users\u', 'la': NOW - 3000}], beats=[(os.getpid(), NOW - 2)])
+        dash = pd.Dashboard(home, webui, None, None, environment={})
+        dash.webui_live = lambda: True
+        rows = {s['id']: s for s in dash.sessions(NOW)}
+        assert sorted(rows) == ['both', 'legacy']
+        assert rows['both']['title'] == 'Chosen title' and rows['both']['workspace'] == r'E:\Project\X' and rows['both']['engines'] == ['webui', 'gateway']
+        assert dash.resume(rows['both'], 7000) == ('http://hermes.localhost:7000/both', 'webapp')
+        assert dash.resume(rows['legacy'], 7000) == ('http://localhost:8787/session/legacy', 'legacy-webui')
+
+    def test_resume_url_encodes_the_id(self):
+        dash = pd.Dashboard(None, None, None, None, environment={})
+        url, _ = dash.resume({'id': 'a/b?c', 'engines': ['gateway']}, 7000)
+        assert url == 'http://hermes.localhost:7000/a%2Fb%3Fc'
+
+    def test_related_sessions_need_tool_call_evidence_and_respect_folder_boundaries(self, tmp_path):
+        home = tmp_path / 'home'
+        gateway_db(home, sessions=[{'id': 'h1', 'cwd': r'C:\Users\u'}, {'id': 'h2', 'cwd': r'C:\Users\u'}, {'id': 'own', 'cwd': r'F:\proj'}], beats=[])
+        db = sqlite3.connect(home / 'state.db')
+        db.execute('create table messages(session_id text, role text, tool_calls text)')
+        call = lambda path: json.dumps([{'function': {'arguments': json.dumps({'path': path})}}])
+        for _ in range(4):
+            db.execute("insert into messages values ('h1','assistant',?)", (call(r'F:\proj\src\a.py'),))
+        db.execute("insert into messages values ('h1','assistant',?)", (call('F:/proj/b.py'),))
+        for _ in range(5):
+            db.execute("insert into messages values ('h2','assistant',?)", (call(r'F:\proj-other\a.py'),))        # sibling folder with the same prefix
+        db.execute("insert into messages values ('h2','assistant',?)", (call(r'F:\proj\once.py'),))              # below the threshold
+        for _ in range(4):
+            db.execute("insert into messages values ('own','assistant',?)", (call(r'F:\proj\own.py'),))
+        db.commit()
+        db.close()
+        dash = pd.Dashboard(home, None, None, None, environment={})
+        assert dash.related_sessions([r'F:\proj'], exclude_ids={'own'}) == [{'id': 'h1', 'calls': 5}]
+
+
+def test_router_sets_no_store_and_rejects_malformed_ids():
+    fastapi = pytest.importorskip('fastapi')
+    from fastapi.testclient import TestClient
+    from routes.projects_dashboard_routes import make_projects_dashboard_router
+
+    class Fake:
+        def overview(self):
+            return {'projects': []}
+
+        def detail(self, project_id, port=7000):
+            raise AssertionError('a malformed id must not reach the data layer')
+
+    app = fastapi.FastAPI()
+    app.include_router(make_projects_dashboard_router(lambda: Fake(), guard=lambda request: None))
+    client = TestClient(app)
+    ok = client.get('/api/projects-dashboard')
+    assert ok.status_code == 200 and ok.headers['cache-control'] == 'no-store'
+    assert client.get('/api/projects-dashboard/project/..%2F..%2Fetc').status_code == 404
+    assert client.get('/api/projects-dashboard/project/ZZZZZZZZZZ').status_code == 404
+
+
+def test_production_wiring_uses_the_default_admin_guard():
+    import inspect
+    from routes import projects_dashboard_routes as routes
+    assert inspect.signature(routes.make_projects_dashboard_router).parameters['guard'].default is routes._reader
+    source = (Path(__file__).resolve().parents[2] / 'app.py').read_text(encoding='utf-8')
+    wiring = [line for line in source.splitlines() if 'make_projects_dashboard_router(' in line and 'import' not in line]
+    assert len(wiring) == 1 and 'guard' not in wiring[0]
+
+
+class TestResumeLink:
+    URL = 'http://hermes.localhost:7000/webapp/launch#ticket=T0K&query=%3Fold'
+
+    def test_resume_adds_the_query_to_the_fragment_and_keeps_the_ticket(self):
+        from urllib.parse import parse_qsl, urlsplit
+        from src.application_modes import with_resume
+        out = with_resume(self.URL, 'local-abc_1.2')
+        fragment = dict(parse_qsl(urlsplit(out).fragment))
+        assert fragment == {'ticket': 'T0K', 'query': '?odysseus_resume=local-abc_1.2'}
+        assert urlsplit(out).path == '/webapp/launch' and urlsplit(out).netloc == 'hermes.localhost:7000'
+
+    def test_malformed_ids_change_nothing(self):
+        from src.application_modes import with_resume
+        for bad in ('../x', 'a b', 'x&query=?evil', '', None, 'a' * 201, 'x\n'):
+            assert with_resume(self.URL, bad) == self.URL
+
+    def test_plugin_validates_the_id_and_only_opens_a_session(self):
+        text = (Path(__file__).resolve().parents[2] / 'integrations/hermes-mode/desktop-plugins/odysseus-resume/plugin.js').read_text(encoding='utf-8')
+        assert "/^[A-Za-z0-9._-]{1,200}$/" in text and 'host.openSession(id)' in text
+        assert 'location.assign' not in text and 'location.href =' not in text and 'window.open' not in text

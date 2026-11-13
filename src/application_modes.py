@@ -8,7 +8,8 @@ import socket
 import subprocess
 import threading
 import time
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit
+import re
 
 
 @dataclass(frozen=True)
@@ -120,6 +121,20 @@ class ModeConfig:
 
 PROJECTS_HOST = 'hermes.localhost'
 _LAUNCH_TIMEOUT = 20
+
+
+RESUME_ID = re.compile(r'[A-Za-z0-9._-]{1,200}')
+
+
+def with_resume(url, session_id):
+    """Ask the Webapp's own launch page to open on ``/?odysseus_resume=<id>``. The ticket stays in the fragment; the
+    odysseus-resume Desktop plugin turns the parameter into host.openSession(). A malformed id changes nothing."""
+    if not isinstance(session_id, str) or not RESUME_ID.fullmatch(session_id):
+        return url
+    parts = urlsplit(url)
+    fragment = [(key, value) for key, value in parse_qsl(parts.fragment, keep_blank_values=True) if key != 'query']
+    fragment.append(('query', '?' + urlencode({'odysseus_resume': session_id})))
+    return parts._replace(fragment=urlencode(fragment)).geturl()
 
 
 def browser_launch_url(raw, gateway_url, browser_port):
@@ -288,7 +303,7 @@ class ModeService:
             connection.close()
         return result
 
-    def launch(self, browser_port):
+    def launch(self, browser_port, resume=None):
         """Ask the running gateway for a one-use sign-in link and return it as the browser must open it.
 
         The link is a credential: it is never logged, stored or put in an error message here."""
@@ -309,7 +324,7 @@ class ModeService:
         if done.returncode != 0 or not isinstance(answer, dict) or answer.get('ok') is not True:
             reason = answer.get('error') if isinstance(answer, dict) and isinstance(answer.get('error'), str) else 'the launch helper failed'
             raise RuntimeError('The Webapp refused the launch request: ' + reason[:200])
-        return browser_launch_url(answer.get('url'), self.config.url, browser_port)
+        return with_resume(browser_launch_url(answer.get('url'), self.config.url, browser_port), resume)
 
     def stop(self, force=False):
         """Stop Hermes only when the port answers as Hermes; refuse while runs are active unless ``force``."""
@@ -475,12 +490,12 @@ def make_router(service):
         return result
 
     @router.post('/projects/launch')
-    def projects_launch(request: Request):
+    def projects_launch(request: Request, resume: str | None = None):
         """Mint the one-use Webapp sign-in link for an authenticated Odysseus administrator in this browser."""
         require_browser_admin(request)
         port = request.url.port
         try:
-            url = service.launch(port)
+            url = service.launch(port, resume=resume) if resume else service.launch(port)
         except RuntimeError as exc:
             raise HTTPException(409, str(exc)) from exc
         if getattr(service, 'grants', None) is not None:

@@ -18,6 +18,7 @@ import sqlite3
 import subprocess
 import time
 from pathlib import Path
+from urllib.parse import quote
 
 STALE_STREAM_SECONDS = 15 * 60
 HEARTBEAT_FRESH_SECONDS = 120
@@ -66,7 +67,7 @@ def _git(cwd, *args):
     flags = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
     env = {**os.environ, 'GIT_TERMINAL_PROMPT': '0', 'GIT_OPTIONAL_LOCKS': '0'}
     try:
-        done = subprocess.run([exe, '--no-optional-locks', '-c', 'core.quotepath=off', '-C', str(cwd), *args], capture_output=True, text=True,
+        done = subprocess.run([exe, '--no-optional-locks', '-c', 'core.quotepath=off', '-c', 'core.fsmonitor=false', '-c', 'core.untrackedCache=false', '-C', str(cwd), *args], capture_output=True, text=True,
                               encoding='utf-8', errors='replace', timeout=_GIT_TIMEOUT, creationflags=flags, env=env, stdin=subprocess.DEVNULL)
     except (OSError, subprocess.TimeoutExpired):
         return None
@@ -199,6 +200,10 @@ def task_state(task, now):
     return 'unknown', 'status %r' % status
 
 
+BS = chr(92)
+PROJECT_ID = re.compile(r'[0-9a-f]{10}')
+
+
 class Dashboard:
     def __init__(self, hermes_home, webui_state, component_root, wiki_root=None, environment=None):
         self.hermes_home = Path(hermes_home) if hermes_home else None
@@ -265,26 +270,29 @@ class Dashboard:
         return any(now - (beat or 0) < HEARTBEAT_FRESH_SECONDS and pid_alive(pid) for pid, beat in rows)
 
     def sessions(self, now=None):
-        """All known conversations, normalised: id, source, title, workspace, updated, state, evidence, project_hint, pinned."""
+        """Every conversation once: id, engines, title, workspace, updated, state, evidence, resume_url.
+
+        The legacy WebUI index and the gateway's state.db both hold the migrated conversations; they are merged by id.
+        A conversation present in the gateway resumes in the Webapp (same host); only WebUI-only ones use the legacy port."""
         now = now or time.time()
-        out = []
         webui_live = self.webui_live()
         gateway_live = self.gateway_live(now)
         index = _read_json(self.webui_state / 'sessions' / '_index.json', []) if self.webui_state else []
         names = {p.get('project_id'): p.get('name') for p in _read_json(self.webui_state / 'projects.json', [])} if self.webui_state else {}
+        merged = {}
         for row in index if isinstance(index, list) else []:
-            if row.get('archived'):
+            if row.get('archived') or not row.get('session_id'):
                 continue
             state, evidence = session_state('webui', row, now=now, gateway_live=gateway_live, webui_live=webui_live)
-            out.append({'id': row.get('session_id'), 'source': 'webui', 'title': row.get('title') or '(untitled)', 'workspace': row.get('workspace') or '',
-                        'updated': row.get('updated_at') or 0, 'messages': row.get('message_count'), 'model': row.get('model'), 'pinned': bool(row.get('pinned')),
-                        'project_name': names.get(row.get('project_id')), 'state': state, 'evidence': evidence})
+            merged[row['session_id']] = {'id': row['session_id'], 'engines': ['webui'], 'title': row.get('title') or '(untitled)', 'workspace': row.get('workspace') or '',
+                                         'updated': row.get('updated_at') or 0, 'messages': row.get('message_count'), 'model': row.get('model'), 'pinned': bool(row.get('pinned')),
+                                         'project_name': names.get(row.get('project_id')), 'state': state, 'evidence': evidence}
         if self.hermes_home and (self.hermes_home / 'state.db').is_file():
             try:
                 with _ro(self.hermes_home / 'state.db') as db:
                     db.row_factory = sqlite3.Row
-                    sessions = db.execute("select id, title, display_name, cwd, git_repo_root, last_activity_at, last_activity_description, started_at, ended_at, end_reason, message_count, model, pinned, "
-                                          "archived, hidden from sessions where coalesce(archived,0)=0 and coalesce(hidden,0)=0").fetchall()
+                    sessions = db.execute("select id, title, display_name, cwd, git_repo_root, last_activity_at, last_activity_description, started_at, ended_at, end_reason, message_count, model, "
+                                          "pinned, archived, hidden from sessions where coalesce(archived,0)=0 and coalesce(hidden,0)=0").fetchall()
                     last = {}
                     for adm in db.execute('select target_session_id, admission_id, status, outcome, seq from session_admissions order by seq'):
                         last[adm['target_session_id']] = {'id': adm['admission_id'], 'status': adm['status'], 'outcome': adm['outcome']}
@@ -295,10 +303,45 @@ class Dashboard:
                 row = {'admission': last.get(s['id']), 'lease_expires': leases.get(s['id']), 'ended_at': s['ended_at'], 'end_reason': s['end_reason'],
                        'last_activity': float(s['last_activity_at'] or 0), 'activity_text': s['last_activity_description']}
                 state, evidence = session_state('gateway', row, now=now, gateway_live=gateway_live, webui_live=webui_live)
-                out.append({'id': s['id'], 'source': 'gateway', 'title': s['title'] or s['display_name'] or '(untitled)', 'workspace': s['git_repo_root'] or s['cwd'] or '',
-                            'updated': float(s['last_activity_at'] or s['started_at'] or 0), 'messages': s['message_count'], 'model': s['model'], 'pinned': bool(s['pinned']),
-                            'project_name': None, 'state': state, 'evidence': evidence})
-        return sorted(out, key=lambda s: -s['updated'])
+                updated = float(s['last_activity_at'] or s['started_at'] or 0)
+                have = merged.get(s['id'])
+                if have:                                      # same conversation in both stores: keep the user-chosen WebUI workspace/title, use gateway evidence if it has any
+                    have['engines'].append('gateway')
+                    have['updated'] = max(have['updated'], updated)
+                    if state != 'unknown':
+                        have['state'], have['evidence'] = state, evidence
+                    continue
+                merged[s['id']] = {'id': s['id'], 'engines': ['gateway'], 'title': s['title'] or s['display_name'] or '(untitled)', 'workspace': s['git_repo_root'] or s['cwd'] or '',
+                                   'updated': updated, 'messages': s['message_count'], 'model': s['model'], 'pinned': bool(s['pinned']), 'project_name': None, 'state': state, 'evidence': evidence}
+        return sorted(merged.values(), key=lambda s: -s['updated'])
+
+    def resume(self, session, port=7000):
+        """(url, kind): prefer the Webapp on this host; the legacy WebUI port is a temporary compatibility route."""
+        if 'gateway' in session['engines']:
+            return 'http://hermes.localhost:%d/%s' % (port, quote(session['id'], safe='')), 'webapp'
+        return 'http://localhost:%d/session/%s' % (int(self.environment.get('ODYSSEUS_WEBUI_PORT') or 8787), quote(session['id'], safe='')), 'legacy-webui'
+
+    def related_sessions(self, scope, exclude_ids, limit=8, minimum=3):
+        """Conversations that did not run in this project's folders but whose agent tool calls referenced files under them.
+
+        Evidence only (counted from recorded tool calls), shown separately, never counted as the project's own sessions."""
+        if not (self.hermes_home and (self.hermes_home / 'state.db').is_file()):
+            return []
+        patterns = []
+        for path in scope:
+            forward = os.path.normpath(path).replace(BS, '/').lower()
+            patterns += [forward + '/', forward + '"']
+        if not patterns:
+            return []
+        clause = ' or '.join('instr(t, ?) > 0' for _ in patterns)
+        flatten = "lower(replace(replace(replace(tool_calls, char(92,92,92,92), char(92)), char(92,92), char(92)), char(92), '/'))"
+        try:
+            with _ro(self.hermes_home / 'state.db') as db:
+                rows = db.execute("select session_id, count(*) from (select session_id, %s as t from messages where role='assistant' and tool_calls is not null) where %s group by 1" % (flatten, clause),
+                                  patterns).fetchall()
+        except sqlite3.Error:
+            return []
+        return [{'id': sid, 'calls': n} for sid, n in sorted(rows, key=lambda r: -r[1]) if n >= minimum and sid not in exclude_ids][:limit]
 
     # -- projects --------------------------------------------------------------------------------------------------------------
     def _candidates(self, sessions):
@@ -307,7 +350,7 @@ class Dashboard:
         projects = _read_json(self.webui_state / 'projects.json', []) if self.webui_state else []
         by_project = {}
         for s in sessions:
-            if s['source'] == 'webui' and s['project_name'] and s['workspace']:
+            if 'webui' in s['engines'] and s['project_name'] and s['workspace']:
                 by_project.setdefault(s['project_name'], []).append(s['workspace'])
         for p in projects:
             for path in dict.fromkeys(by_project.get(p.get('name'), [])):
@@ -411,6 +454,8 @@ class Dashboard:
 
     # -- one project ------------------------------------------------------------------------------------------------------------
     def detail(self, project_id, now=None, port=7000):
+        if not PROJECT_ID.fullmatch(str(project_id)):
+            return None
         now = now or time.time()
         project = next((p for p in self.projects(now) if p['id'] == project_id), None)
         if not project:
@@ -448,7 +493,16 @@ class Dashboard:
         scope = list(project['paths']) + [w['path'] for w in worktrees]
         sessions = [s for s in self.sessions(now) if self._belongs(s['workspace'], scope, project_id)]
         for s in sessions:
-            s['resume_url'] = ('http://localhost:8787/session/%s' % s['id']) if s['source'] == 'webui' else 'http://hermes.localhost:%d/%s' % (port, s['id'])
+            s['resume_url'], s['resume_kind'] = self.resume(s, port)
+        placed = {s['id'] for s in sessions}
+        by_id = {s['id']: s for s in self.sessions(now)}
+        related = []
+        for hit in self.related_sessions(scope, placed):
+            base = by_id.get(hit['id'])
+            if base:
+                url, kind = self.resume(base, port)
+                related.append({**base, 'calls': hit['calls'], 'resume_url': url, 'resume_kind': kind,
+                                'evidence': 'inferred: %d agent tool calls referenced files under this project (it ran in %s)' % (hit['calls'], base['workspace'] or 'no recorded folder')})
         wiki = None
         if project['wiki']:
             name = project['wiki']['project']
@@ -466,7 +520,7 @@ class Dashboard:
                       'request': self.request_command(path), 'request_template': self.request_command('{path}'), 'revoke_template': self.revoke_command('{path}'), 'revoke': self.revoke_command(project['permission'].get('grant')),
                       'note': 'These are file-tool write rules, not OS containment: a terminal, MCP servers and any program running as you are not limited by them. '
                               '"Allow for this chat" approvals are held in memory by the running Hermes process and cannot be listed here.'}
-        return {**project, 'git': git, 'worktrees': worktrees, 'session_list': sessions, 'wiki_detail': wiki, 'permission_detail': permission, 'generated_at': now}
+        return {**project, 'git': git, 'worktrees': worktrees, 'session_list': sessions, 'related_sessions': related, 'wiki_detail': wiki, 'permission_detail': permission, 'generated_at': now}
 
     @staticmethod
     def request_command(path):

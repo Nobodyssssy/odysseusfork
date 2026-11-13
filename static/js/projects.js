@@ -74,13 +74,30 @@ function visibleProjects() {
   });
 }
 
-async function openProjects() {
+// The grant exchange needs a Referer from this origin, and Odysseus sends Referrer-Policy: no-referrer on every page, so this one link
+// opts in to sending the origin (never the path) to the page it points at: the same pattern as the Odysseus mode selector.
+function follow(href) {
+  const link = document.createElement('a');
+  link.href = href;
+  link.target = '_blank';
+  link.referrerPolicy = 'origin';
+  link.rel = 'noopener';
+  document.body.append(link);
+  link.click();
+  link.remove();
+}
+
+async function openProjects(resume) {
   try {
-    const response = await fetch('/api/application-modes/projects/launch', { method: 'POST', credentials: 'same-origin' });
+    const response = await fetch('/api/application-modes/projects/launch' + (resume ? '?resume=' + encodeURIComponent(resume) : ''), { method: 'POST', credentials: 'same-origin' });
     const body = await response.json().catch(() => ({}));
     if (!response.ok || !body.url) throw new Error(body.detail || 'Projects could not be opened (' + response.status + ')');
-    window.open(body.url, '_blank', 'noopener');
-    toast('Opened Projects; Resume links work in this browser afterwards');
+    const url = new URL(body.url);
+    if (url.protocol !== 'http:' || url.hostname !== 'hermes.localhost' || url.port !== location.port || url.pathname !== '/__odysseus/enter' || !url.search.startsWith('?ticket=') || url.hash || url.username || url.password) {
+      throw new Error('Projects returned an unexpected address; nothing was opened');
+    }
+    follow(url.href);
+    toast(resume ? 'Opening the conversation in Projects. If it opens on the start page, choose it in the sidebar.' : 'Opened Projects');
   } catch (error) { toast(error.message); }
 }
 
@@ -89,7 +106,7 @@ function renderEngines() {
   $('engines').replaceChildren(...(o ? [
     h('span', { title: 'Managed Hermes gateway (Webapp), from its heartbeat record' }, 'Gateway: ' + (o.gateway_live ? 'running' : 'stopped')),
     h('span', { title: 'Legacy Hermes WebUI port' }, 'WebUI: ' + (o.webui_live ? 'running' : 'stopped')),
-    h('button', { type: 'button', title: 'Signs this browser in to the Hermes Webapp so Resume links work', onclick: openProjects }, 'Open Projects'),
+    h('button', { type: 'button', title: 'Signs this browser in to the Hermes Webapp so Resume links work', onclick: () => openProjects() }, 'Open Projects'),
   ] : []));
 }
 
@@ -129,13 +146,14 @@ function renderList() {
 }
 
 function sessionRow(s, showProject) {
+  const webapp = s.resume_kind === 'webapp';
   const link = s.resume_url
-    ? h('a', { href: s.resume_url, target: '_blank', rel: 'noopener', title: s.source === 'webui' ? 'Opens in the legacy WebUI (must be running and signed in)' : 'Opens in the Projects Webapp. If it answers 401, press Open Projects (top right) once to sign this browser in.' }, 'Resume')
+    ? h('a', { href: s.resume_url, target: '_blank', rel: 'noopener', onclick: webapp ? event => { event.preventDefault(); openProjects(s.id); } : null, title: s.resume_kind === 'legacy-webui' ? 'Opens in the legacy WebUI on its own port (temporary route: must be running and signed in)' : 'Signs this browser in to the Projects Webapp and opens the conversation there' }, s.resume_kind === 'legacy-webui' ? 'Resume (legacy)' : 'Resume')
     : null;
   return h('tr', null,
     h('td', null, stateBadge(s.state, s.evidence)),
     h('td', null, h('div', null, (s.pinned ? '\u2605 ' : '') + s.title), h('div', { class: 'evidence' }, s.evidence)),
-    h('td', null, s.source === 'webui' ? 'WebUI' : 'Hermes'),
+    h('td', null, s.engines.includes('gateway') ? 'Hermes' : 'WebUI only'),
     showProject ? h('td', { class: 'mono' }, s.workspace || '-') : null,
     h('td', { class: 'num' }, s.messages != null ? s.messages : '-'),
     h('td', { class: 'num' }, ago(s.updated)),
@@ -147,6 +165,14 @@ function sessionTable(rows, showProject) {
   return h('table', null,
     h('thead', null, h('tr', null, h('th', null, 'State'), h('th', null, 'Conversation and evidence'), h('th', null, 'Engine'), showProject ? h('th', null, 'Workspace') : null, h('th', { class: 'num' }, 'Msgs'), h('th', { class: 'num' }, 'Last'), h('th', null, ''))),
     h('tbody', null, rows.map(r => sessionRow(r, showProject))));
+}
+
+function sessionsView(d) {
+  const related = d.related_sessions || [];
+  return h('div', null, sessionTable(d.session_list, false),
+    related.length ? h('div', null, h('h3', null, 'Related conversations (inferred, not counted above)'),
+      h('p', { class: 'evidence' }, 'These ran in another folder, but their agent tool calls referenced files in this project. This is evidence from recorded tool calls, not a recorded link.'),
+      sessionTable(related, true)) : null);
 }
 
 function worktreeTable(d) {
@@ -252,7 +278,7 @@ function renderDetail() {
   if (!d) { el.replaceChildren(h('p', { class: 'empty' }, store.selected ? 'Loading project\u2026' : 'Select a project.')); return; }
   const counts = { sessions: d.session_list.length, wiki: d.wiki_detail ? d.wiki_detail.handoffs.filter(x => x.status === 'open').length : 0 };
   const tabs = h('div', { class: 'tabs', role: 'tablist' }, TABS.map(([id, label], i) => h('button', { type: 'button', role: 'tab', 'aria-selected': String(store.tab === id), title: 'Key ' + (i + 1), onclick: () => { store.tab = id; setHash(); renderDetail(); } }, label, counts[id] ? h('span', { class: 'count' }, counts[id]) : null)));
-  const body = { overview: overviewView, sessions: x => sessionTable(x.session_list, false), git: gitView, wiki: wikiView, access: accessView }[store.tab](d);
+  const body = { overview: overviewView, sessions: sessionsView, git: gitView, wiki: wikiView, access: accessView }[store.tab](d);
   el.replaceChildren(
     h('h2', null, d.name, permissionChip(d.permission), d.sources.map(s => h('span', { class: 'chip' }, s))),
     h('div', { class: 'path' }, h('span', null, d.path), h('button', { type: 'button', onclick: () => copy(d.path) }, 'Copy path'),
