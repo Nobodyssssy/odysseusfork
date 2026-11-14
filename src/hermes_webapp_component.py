@@ -452,17 +452,63 @@ class WebappComponent:
                 return config
             return self._rebuild(pin, origin, config, agent, home, python, port, public_url, repo_roots, build)
 
-    def _rebuild(self, pin, origin, config, agent, home, python, port, public_url, repo_roots, build):
+    def _rebuild(self, pin, origin, config, agent, home, python, port, public_url, repo_roots, build, stage=False):
         if origin == 'adopted':
             candidate = self._ensure_adopted(pin, config, agent, home, python, port, build)
         else:
-            candidate = self._ensure_managed(pin, config, home, python, port, public_url, repo_roots)
+            candidate = self._ensure_managed(pin, config, home, python, port, public_url, repo_roots, stage)
         for key in PRESERVED_SETTINGS:                              # settings the user chose must survive a new release
             if config and key in config and key not in candidate:
                 candidate[key] = config[key]
+        if stage:
+            atomic_json(self._release_dir(candidate['release']) / 'candidate.json', candidate)
+            return candidate
         atomic_json(self.config_path, candidate)
         self._sweep_releases(candidate)
         return candidate
+
+    def stage_release(self, *, python=None, port=None, public_url='', repo_roots=None):
+        """Build the next managed release side by side, WITHOUT switching to it: nothing the running gateway uses, and no home or configuration
+        file, is touched. The release is 'staged' (kept by the sweep) until ``activate_release`` makes it current; a restart then serves it."""
+        pin = load_webapp_pin(self.application_root)
+        self.last_actions = []
+        with component_lock(self.directory):
+            config = self.config()
+            if not config or config['origin'] != 'managed':
+                raise ComponentError('Only a managed Webapp installation can stage a release.')
+            return self._rebuild(pin, 'managed', config, None, None, python, port, public_url, repo_roots, True, stage=True)
+
+    def activate_release(self, release):
+        """Make a staged release current (the current one becomes ``previous``, so ``rollback`` returns to it). Does not restart the gateway."""
+        if not _RELEASE.fullmatch(str(release)):
+            raise ComponentError('A release identifier is twelve hexadecimal characters.')
+        with component_lock(self.directory):
+            config = self._require_managed()
+            release_dir = self._release_dir(release)
+            try:
+                record = json.loads((release_dir / 'release.json').read_text(encoding='utf-8'))
+                candidate = json.loads((release_dir / 'candidate.json').read_text(encoding='utf-8'))
+            except (OSError, ValueError) as exc:
+                raise ComponentError('The staged release is missing or unreadable; nothing was changed.') from exc
+            if record.get('state') != 'staged' or candidate.get('release') != release:
+                raise ComponentError('Only a complete staged release can be activated; nothing was changed.')
+            candidate['previous'] = config.get('release')
+            for key in PRESERVED_SETTINGS:
+                if key in config and key not in candidate:
+                    candidate[key] = config[key]
+            self.validate(candidate)
+            source, home_path = Path(candidate['agent']), Path(candidate['home'])
+            self.check_desktop_plugin(home_path)
+            self._prepare_home(candidate['python'], home_path, loopback_port(candidate['url']), candidate.get('public_url') or '', None,
+                               self.config_schema_version(source))
+            self.install_desktop_plugin(home_path)
+            candidate['desktop_plugins'] = self.installed_desktop_plugins(home_path)
+            self._write_release(release_dir, 'ready', revision=record['revision'], origin='managed', receipt_sha256=record.get('receipt_sha256'),
+                                tools=record.get('tools'))
+            atomic_json(self.config_path, candidate)
+            self.last_actions = []
+            self._sweep_releases(candidate)
+            return candidate
 
     def _heal(self, config, *, home=None, port=None, public_url=None, allow_move=False):
         """Managed only, never builds. Recreates a missing gateway home or its config, applies a requested move to another home or port,
@@ -512,6 +558,8 @@ class WebappComponent:
                 state = json.loads((entry / 'release.json').read_text(encoding='utf-8')).get('state')
             except (OSError, ValueError):
                 state = 'unknown'
+            if state == 'staged':                  # a finished release waiting for activation is not a leftover
+                continue
             if state == 'failed':
                 failed.append(entry)
                 continue
@@ -565,7 +613,7 @@ class WebappComponent:
                 'bundle': str(bundle) if bundle else None, 'url': f'http://127.0.0.1:{int(port)}/', 'public_url': '',
                 'revisions': {'webapp': pin.revision}, 'build': {'receipt_sha256': verdict['receipt_sha256'], 'tools': tool_versions} if verdict else None}
 
-    def _ensure_managed(self, pin, previous, home, python, port, public_url, repo_roots):
+    def _ensure_managed(self, pin, previous, home, python, port, public_url, repo_roots, stage=False):
         port = int(port or (loopback_port(previous['url']) if previous else 0))
         if not port:
             raise ComponentError('A managed Webapp needs --port.')
@@ -573,12 +621,12 @@ class WebappComponent:
         release_dir = private_directory(self._release_dir(release))
         self._write_release(release_dir, 'preparing', revision=pin.revision, origin='managed')
         try:
-            return self._provision_managed(pin, previous, release, release_dir, home, python, port, public_url, repo_roots)
+            return self._provision_managed(pin, previous, release, release_dir, home, python, port, public_url, repo_roots, stage)
         except BaseException:
             self._write_release(release_dir, 'failed', revision=pin.revision, origin='managed')      # kept for its logs; never referenced
             raise
 
-    def _provision_managed(self, pin, previous, release, release_dir, home, python, port, public_url, repo_roots):
+    def _provision_managed(self, pin, previous, release, release_dir, home, python, port, public_url, repo_roots, stage=False):
         log = release_dir / 'install.log'
         env = {**self.environment, 'GIT_TERMINAL_PROMPT': '0'}
         source = release_dir / 'src'
@@ -609,9 +657,12 @@ class WebappComponent:
             if not existing.get('sign_in_gate_configured'):
                 raise ComponentError('webapp.public_url engages the gateway sign-in gate, which needs an auth provider the user configures '
                                      '(dashboard.basic_auth); none is configured in this home, so no public URL was set.')
-        self._prepare_home(runtime, home_path, port, public_url or '', repo_roots, schema)
-        self.install_desktop_plugin(home_path)
-        self._write_release(release_dir, 'ready', revision=pin.revision, origin='managed', receipt_sha256=verdict['receipt_sha256'], tools=tool_versions)
+        if not stage:
+            self._prepare_home(runtime, home_path, port, public_url or '', repo_roots, schema)
+            self.install_desktop_plugin(home_path)
+        # A staged release is complete but not current: it stays 'staged' (the sweep keeps it) until ``activate_release``.
+        self._write_release(release_dir, 'staged' if stage else 'ready', revision=pin.revision, origin='managed',
+                            receipt_sha256=verdict['receipt_sha256'], tools=tool_versions)
         return {'version': 1, 'kind': 'webapp', 'enabled': True, 'origin': 'managed', 'release': release,
                 'previous': previous.get('release') if previous else None, 'agent': str(source), 'python': runtime, 'python_origin': runtime_origin,
                 'home': str(home_path), 'bundle': str(bundle), 'url': f'http://127.0.0.1:{port}/', 'public_url': public_url or '',

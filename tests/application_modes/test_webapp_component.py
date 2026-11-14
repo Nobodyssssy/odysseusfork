@@ -270,6 +270,37 @@ class ManagedTests(ComponentCase):
         self.assertEqual([json.loads((item / 'release.json').read_text())['state'] for item in releases], ['failed'])
         self.assertIsNone(read_webapp_config(self.component.config_path))
 
+    def test_a_staged_release_changes_nothing_in_use_until_it_is_activated_and_can_be_rolled_back(self):
+        first = self.managed(repo_roots=None)
+        home_config = (Path(first['home']) / 'config.yaml')
+        before = (self.component.config_path.read_bytes(), home_config.read_bytes() if home_config.exists() else None)
+        staged = self.component.stage_release(python=self.python)
+        self.assertNotEqual(staged['release'], first['release'])
+        self.assertEqual(self.runtime_installs[-1][2], ('mcp',), 'a staged release proves its runtime extras too')
+        record = json.loads((self.component.directory / 'releases' / staged['release'] / 'release.json').read_text())
+        self.assertEqual(record['state'], 'staged')
+        self.assertEqual((self.component.config_path.read_bytes(), home_config.read_bytes() if home_config.exists() else None), before,
+                         'staging must not touch the live configuration or the gateway home')
+        self.component._sweep_releases(first)             # a finished, waiting release is not a leftover
+        self.assertTrue((self.component.directory / 'releases' / staged['release']).is_dir())
+
+        active = self.component.activate_release(staged['release'])
+        self.assertEqual((active['release'], active['previous']), (staged['release'], first['release']))
+        self.assertEqual(json.loads((self.component.directory / 'releases' / staged['release'] / 'release.json').read_text())['state'], 'ready')
+        self.assertEqual(read_webapp_config(self.component.config_path)['release'], staged['release'])
+        with self.assertRaises(ComponentError):
+            self.component.activate_release(staged['release'])      # no longer staged
+
+        back = self.component.rollback()
+        self.assertEqual(back['release'], first['release'])
+        self.assertEqual(Path(back['agent']).parent.name, first['release'])
+
+    def test_a_release_that_is_not_staged_cannot_be_activated(self):
+        self.managed(repo_roots=None)
+        for bad in ('zz', '0' * 12):
+            with self.assertRaises(ComponentError):
+                self.component.activate_release(bad)
+
     def test_the_locks_runtime_extras_are_required_and_validated(self):
         self.assertEqual(hwc.load_runtime_extras(self.app), ('mcp',))
         lock = self.app / 'config/hermes-component.lock.json'
