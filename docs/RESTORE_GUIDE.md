@@ -49,8 +49,8 @@ py -3.12 -m venv venv
 ```powershell
 cd F:\Odysseus
 powershell -ExecutionPolicy Bypass -File scripts\recovery\restore-environment.ps1 `
-  -Snapshot  E:\Backup\snapshot-20261114-101935-f609ae `
-  -RecoveryFolder E:\Backup\recovery-20261114-112658 `
+  -Snapshot  E:\Backup\snapshot-YYYYMMDD-HHMMSS-xxxxxx `
+  -RecoveryFolder E:\Backup\recovery-YYYYMMDD-HHMMSS `
   -SkillsRepo F:\hermes-personal-skills
 ```
 
@@ -98,7 +98,7 @@ Then start Odysseus (`launch-windows.ps1`) and open `http://localhost:7000`.
 
 Workspace grants are short-lived on purpose: sign in to Odysseus and approve them again.
 
-A full backup contains passwords and keys: always keep it encrypted (section 8).
+A full backup contains passwords and keys: always keep it encrypted (section 9).
 
 ## 7. Things that are tied to this PC
 
@@ -125,7 +125,7 @@ Always pass `--data-dir` explicitly if you run the script from a copy of the rep
 
 The backup holds private conversations and (in full mode) credentials.
 
-1. Zip + encrypt: `7z a -t7z -mhe=on -p E:\Backup-2026-11-14.7z E:\Backup\snapshot-... E:\Backup\recovery-...` (7-Zip asks for a passphrase and encrypts file names too). Or use `backup-extras.ps1 -Encrypt`.
+1. Zip + encrypt: `7z a -t7z -mhe=on -p E:\Backup-YYYY-MM-DD.7z E:\Backup\snapshot-... E:\Backup\recovery-...` (7-Zip asks for a passphrase and encrypts file names too). Or use `backup-extras.ps1 -Encrypt`.
 2. Keep the passphrase in a password manager, not on the same drive.
 3. Copy the `.7z` to a drive that will not be wiped: a USB disk or cloud storage that you control. Not E:/D:/F: if those get reinstalled.
 4. Once a quarter, extract it on another PC and run the dry run in section 3. A backup you have never restored is a guess.

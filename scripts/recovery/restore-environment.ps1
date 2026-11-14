@@ -5,7 +5,7 @@
  Steps: (1) preflight, (2) restore Odysseus + managed Hermes from a snapshot, (3) restore git bundles,
  (4) install personal skills, (5) print the manual checklist.
 .EXAMPLE
- .\restore-environment.ps1 -RecoveryFolder E:\Recovery\recovery-20261114-120000 -Snapshot E:\Recovery\snapshot-20261114-110000-abc123            # dry run
+ .\restore-environment.ps1 -RecoveryFolder E:\Recovery\recovery-YYYYMMDD-HHMMSS -Snapshot E:\Recovery\snapshot-YYYYMMDD-HHMMSS-xxxxxx            # dry run
  .\restore-environment.ps1 -RecoveryFolder ... -Snapshot ... -SkillsRepo F:\hermes-personal-skills -Apply
 #>
 param(
