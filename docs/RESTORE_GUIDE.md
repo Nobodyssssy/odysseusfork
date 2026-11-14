@@ -130,6 +130,27 @@ The backup holds private conversations and (in full mode) credentials.
 3. Copy the `.7z` to a drive that will not be wiped: a USB disk or cloud storage that you control. Not E:/D:/F: if those get reinstalled.
 4. Once a quarter, extract it on another PC and run the dry run in section 3. A backup you have never restored is a guess.
 
+### One-step encrypted full backup (recommended)
+
+`scripts\recovery\make-encrypted-backup.ps1` makes a complete backup including credentials, encrypts it with GnuPG AES-256, decrypts it again to check it, and deletes every unencrypted temporary copy. You type the passphrase at a prompt (16+ characters, unique, kept in a password manager). It is never written to disk.
+
+```powershell
+cd F:\Odysseus
+powershell -ExecutionPolicy Bypass -File scripts\recovery\make-encrypted-backup.ps1 -Destination U:\OdysseusVault -IncludeExtras
+```
+
+Restore: `gpg --output backup.tar --decrypt odysseus-recovery-YYYYMMDD-HHMMSS.tar.gpg`, then `tar -xf backup.tar`, then section 3.
+
+### Credentials that are tied to Windows and may need sign-in after a Windows reinstall
+
+| Item | Why |
+|---|---|
+| Windows Credential Manager entries (GitHub / Git Credential Manager, Visual Studio, Copilot token, Firefox storage) | Protected by your Windows account (DPAPI). Not in any backup. Sign in again. |
+| Browser sessions and saved passwords | Same. |
+| Claude (`~\.claude`), Codex (`~\.codex\auth.json`), Hermes provider tokens (`auth.json`) | Plain files, so a full backup restores them, but providers may revoke tokens after a long gap or a new device: run the login again if a tool says unauthorized. |
+| Odysseus `.app_key`, `auth.json` | Plain files; restored by a full backup. Without `.app_key`, encrypted values in the Odysseus database (email, provider keys) cannot be read. |
+| SSH keys (`~\.ssh`) | Not in the Odysseus backup. Copy them yourself into the encrypted backup, or create new keys. |
+
 ## 10. Troubleshooting
 
 | Message | Meaning |
