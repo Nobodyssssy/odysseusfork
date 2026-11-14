@@ -301,7 +301,7 @@ def _build_backup(odysseus_root, hermes_home, backup_root, startup_files=(), tas
     if component and (component / 'managed' / 'webapp' / 'component.json').is_file():
         copy(component / 'managed' / 'webapp' / 'component.json', Path('component/managed/webapp/component.json'))
     if component and (component / 'state' / 'hermes-gateway').is_dir():       # the Webapp gateway's own sessions and settings; its sign-in credential is regenerated, not saved
-        tree(component / 'state' / 'hermes-gateway', Path('component/state/hermes-gateway'), ('webapp', 'logs', 'cache', 'tmp'))
+        tree(component / 'state' / 'hermes-gateway', Path('component/state/hermes-gateway'), ('webapp', 'logs', 'cache', 'tmp') + _HERMES_EXCLUDED)
     for source in startup_files:
         source = Path(source)
         if source.is_file():
