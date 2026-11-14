@@ -21,7 +21,7 @@ Symptom: Personal -> Projects showed "Could not open Hermes from Odysseus. Retur
 | 4 full Personal -> Projects -> `← Personal` cycles, no interception | all pass, no refusal in the server log |
 | Referer removed from the first click navigation (the observed signature) | refused (`reason=referer seen=absent`), page reloads itself, request 2 is accepted, Webapp opens in about 1 s |
 | Ticket already spent / unknown on two requests | `reason=ticket-unknown-or-already-used` twice, bounce to Odysseus, fresh ticket, request 3 accepted, Webapp opens in about 2 s |
-| Referer removed from every request (a cause the retry cannot fix) | exactly 3 requests, then the message stays; 20 s of silence, no loop (`enter-giveup.png`) |
+| Referer removed from every request (a cause the retry cannot fix) | exactly 3 requests, then the message stays; 20 s of silence, no loop (a screenshot of the message was captured during development and is not published) |
 | Optional "Open Projects in new tab" | opens Hermes, the original tab is untouched |
 | Logout in Odysseus | Hermes API 200 before, 401 after; the Hermes tab leaves for the Odysseus login |
 

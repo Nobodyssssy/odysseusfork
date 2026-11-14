@@ -1,6 +1,6 @@
 # Personal / Projects: Odysseus with the official Hermes Webapp
 
-Branch `feature/webapp-proxy`, local only (nothing pushed or deployed). Evidence: `docs/evidence/projects/` (16 screenshots, disposable preview, real browser, real managed install).
+Branch `feature/webapp-proxy`, local only (nothing pushed or deployed). Evidence: 16 development screenshots (disposable preview, real browser, real managed install) were captured but are not published in this repository.
 
 ## What it is
 
