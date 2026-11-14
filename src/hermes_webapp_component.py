@@ -46,6 +46,10 @@ KNOWN_PREVIOUS_PLUGIN_SHA256 = ('f72f51dabc67c4c99f40aca182ac66546220c678e534102
 BUILD_SCRIPT = 'apps/desktop/scripts/build-webapp.mjs'
 BUNDLE_RELATIVE = 'apps/desktop/dist-webapp'
 ROUTE_GUARD_PATCH = 'integrations/hermes-mode/patches/webapp-route-guard.patch'
+MCP_RECOVERY_PATCH = 'integrations/hermes-mode/patches/webapp-mcp-recovery.patch'
+# What importing each runtime extra must make possible, proven against the committed environment before a release is 'ready'.
+RUNTIME_EXTRA_IMPORTS = {'mcp': 'mcp.client.stdio'}
+_EXTRA_NAME = re.compile(r'[a-z0-9][a-z0-9_-]*')
 PRESERVED_SETTINGS = ('write_roots', 'logins')
 _NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
 _RELEASE = re.compile(r'[0-9a-f]{12}')
@@ -75,6 +79,19 @@ def load_webapp_pin(application_root):
         return SourcePin('agent', entry['repository'], entry['revision'])
     except (OSError, KeyError, TypeError, ValueError) as exc:
         raise ComponentError('The Hermes Webapp pin is missing or invalid.') from exc
+
+
+def load_runtime_extras(application_root):
+    """The Hermes extras every managed release must carry (the lock's ``runtime.extras``). A release built without them silently ran without
+    the MCP SDK; naming them in the lock makes each new release install and prove them."""
+    try:
+        data = json.loads((Path(application_root) / 'config/hermes-component.lock.json').read_text(encoding='utf-8'))
+        extras = data['runtime']['extras']
+    except (OSError, KeyError, TypeError, ValueError) as exc:
+        raise ComponentError('The Hermes runtime extras are missing from the component lock.') from exc
+    if not isinstance(extras, list) or not all(isinstance(item, str) and _EXTRA_NAME.fullmatch(item) for item in extras):
+        raise ComponentError('The Hermes runtime extras in the component lock are invalid.')
+    return tuple(extras)
 
 
 def loopback_port(url):
@@ -565,20 +582,25 @@ class WebappComponent:
         log = release_dir / 'install.log'
         env = {**self.environment, 'GIT_TERMINAL_PROMPT': '0'}
         source = release_dir / 'src'
-        checkout_source(source, pin, log, env, self.route_guard_patch())
+        checkout_source(source, pin, log, env, self.webapp_patches())
         bundle, verdict, tool_versions = self._build(source, release_dir, log)
+        extras = load_runtime_extras(self.application_root)
+        home_path = private_directory(home or (previous['home'] if previous else self.root / 'state/hermes-gateway'))
         if python:
             probe_python(python, require_agent=True)
             runtime, runtime_origin = str(python), 'external'
+            # The gateway activates this release's own committed environment over `python`: install the extras into THAT one, and prove it.
+            self._install_runtime_extras(source, runtime, home_path, extras, log, env)
         else:
             seed = self.environment.get('HERMES_WEBUI_PYTHON') or sys.executable
             probe_python(seed)
             run_install([seed, '-B', '-m', 'pm.build_env', '--source', str(source), '--out', str(release_dir / 'venv'),
-                         '--cache', str(self.directory / 'cache/pm')], log, {**env, 'HERMES_RUNTIME_DIR': str(self.directory / 'runtime')}, cwd=source)
+                         '--cache', str(self.directory / 'cache/pm'), *[arg for extra in extras for arg in ('--extra', extra)],
+                         *(['--record-selection'] if extras else [])], log, {**env, 'HERMES_RUNTIME_DIR': str(self.directory / 'runtime')}, cwd=source)
             runtime = str(release_dir / ('venv/Scripts/python.exe' if os.name == 'nt' else 'venv/bin/python'))
             probe_python(runtime, require_agent=True)
             runtime_origin = 'managed'
-        home_path = private_directory(home or (previous['home'] if previous else self.root / 'state/hermes-gateway'))
+            self._verify_runtime_extras(runtime, extras)
         self.check_desktop_plugin(home_path)                 # every conflict is found before anything in the home is written
         schema = self.config_schema_version(source)
         if public_url:
@@ -595,6 +617,39 @@ class WebappComponent:
                 'home': str(home_path), 'bundle': str(bundle), 'url': f'http://127.0.0.1:{port}/', 'public_url': public_url or '',
                 'revisions': {'webapp': pin.revision}, 'build': {'receipt_sha256': verdict['receipt_sha256'], 'tools': tool_versions},
                 'desktop_plugins': self.installed_desktop_plugins(home_path)}
+
+    def _install_runtime_extras(self, source, python, home, extras, log, env):
+        """Install ``extras`` into the environment PM commits for ``source`` under ``home`` (what ``hermes pm install --extra`` does), then prove
+        each imports from that environment. Nothing is installed for an empty list. Raises, so the release is never marked ready without them."""
+        if not extras:
+            return
+        code = 'import sys; from pm.install import sync_venv; sync_venv(sys.argv[1].split(","), explicit=True)'
+        run_install([str(python), '-B', '-c', code, ','.join(extras)], log, {**env, 'HERMES_HOME': str(home), 'PYTHONPATH': str(source),
+                                                                          'HERMES_RUNTIME_DIR': str(self.directory / 'runtime')}, cwd=source)
+        locate = 'from pathlib import Path; from pm.environments import committed_venv; print(committed_venv(Path.cwd()) or "")'
+        try:
+            found = subprocess.run([str(python), '-I', '-B', '-c', 'import sys; sys.path.insert(0, sys.argv[1]);' + locate, str(source)], cwd=source,
+                                   env={**env, 'HERMES_HOME': str(home)}, capture_output=True, text=True, timeout=120, creationflags=_NO_WINDOW)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise ComponentError('The release environment could not be located after installing the runtime extras.') from exc
+        venv = found.stdout.strip().splitlines()[-1] if found.returncode == 0 and found.stdout.strip() else ''
+        if not venv:
+            raise ComponentError('PM committed no environment for this release; the runtime extras are not installed.')
+        self._verify_runtime_extras(str(Path(venv) / ('Scripts/python.exe' if os.name == 'nt' else 'bin/python')), extras)
+
+    @staticmethod
+    def _verify_runtime_extras(python, extras):
+        for extra in extras:
+            module = RUNTIME_EXTRA_IMPORTS.get(extra)
+            if not module:
+                continue
+            try:
+                result = subprocess.run([str(python), '-I', '-B', '-c', f'import {module}'], capture_output=True, text=True, timeout=120,
+                                        creationflags=_NO_WINDOW)
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                raise ComponentError(f'The {extra} runtime extra could not be verified in the release environment.') from exc
+            if result.returncode:
+                raise ComponentError(f'The release environment cannot import {module} (runtime extra {extra}); the release was not marked ready.')
 
     # -- gateway home (managed only) -------------------------------------------------------
     @staticmethod
@@ -700,7 +755,7 @@ class WebappComponent:
         try:
             agent = safe_directory(config['agent'])
             with read_only_git():
-                verify_checkout(agent, pin, self.route_guard_patch() if config.get('origin') == 'managed' else None)
+                verify_checkout(agent, pin, self.applied_patches(agent) if config.get('origin') == 'managed' else None)
             if config.get('origin') == 'managed' and self.route_guard_state(config) != 'applied':
                 raise ComponentError('The managed gateway source lacks the reviewed route guard; it will not be started.')
             probe_python(config['python'], require_agent=True)
@@ -999,12 +1054,28 @@ class WebappComponent:
             raise ComponentError('The reviewed route-guard patch is missing from this Odysseus installation.')
         return path
 
+    def webapp_patches(self):
+        """The reviewed patches a new managed release carries, in the order they are applied."""
+        recovery = (self.application_root / MCP_RECOVERY_PATCH).resolve()
+        if not recovery.is_file():
+            raise ComponentError('The reviewed MCP-recovery patch is missing from this Odysseus installation.')
+        return (self.route_guard_patch(), recovery)
+
+    def applied_patches(self, agent):
+        """The reviewed patch set a managed source carries exactly: the current set, or the route guard alone (an earlier release kept side by
+        side for rollback). The current set when it matches neither, so a mismatch is reported against it."""
+        for patches in (self.webapp_patches(), self.route_guard_patch()):
+            if patch_state(agent, patches) == 'applied':
+                return patches
+        return self.webapp_patches()
+
     def route_guard_state(self, config):
-        """'applied' for a managed source carrying exactly the reviewed patch, else 'absent' (adopted gateways run the user's unpatched code)."""
+        """'applied' for a managed source carrying exactly a reviewed patch set, else 'absent' (adopted gateways run the user's unpatched code)."""
         if config.get('origin') != 'managed':
             return 'absent'
         try:
-            return patch_state(safe_directory(config['agent']), self.route_guard_patch())
+            agent = safe_directory(config['agent'])
+            return patch_state(agent, self.applied_patches(agent))
         except (ComponentError, OSError, KeyError):
             return 'unknown'
 

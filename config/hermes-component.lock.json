@@ -12,5 +12,5 @@
     "repository": "NousResearch/hermes-agent",
     "revision": "3b421578588243f920886e6fe79a6faa87ea026e"
   },
-  "runtime": { "major": 3, "minor": 14, "owner": "hermes-pm", "extras": [] }
+  "runtime": { "major": 3, "minor": 14, "owner": "hermes-pm", "extras": ["mcp"] }
 }

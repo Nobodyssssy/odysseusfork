@@ -51,14 +51,23 @@ def _patch_files(patch):
     return {line[6:].strip() for line in Path(patch).read_text(encoding='utf-8').splitlines() if line.startswith('+++ b/')}
 
 
+def _patch_list(patch):
+    """One reviewed patch (a path) or an ordered sequence of them, as a list; empty for none."""
+    if not patch:
+        return []
+    return [Path(patch)] if isinstance(patch, (str, os.PathLike)) else [Path(item) for item in patch]
+
+
 def patch_state(path, patch):
-    """'absent' (clean at the pin), 'applied' (exactly the reviewed patch), or 'foreign' (anything else)."""
+    """'absent' (clean at the pin), 'applied' (exactly the reviewed patch, or the whole reviewed sequence), or 'foreign' (anything else)."""
     if _git(path, 'rev-parse', 'HEAD').stdout.strip() and not _git(path, 'status', '--porcelain', '--untracked-files=no').stdout.strip():
         return 'absent'
-    if patch and _git(path, *_PATCH_FLAGS, '-R', '--check', str(patch), check=False).returncode == 0:
+    patches = _patch_list(patch)
+    if patches and all(_git(path, *_PATCH_FLAGS, '-R', '--check', str(item), check=False).returncode == 0 for item in patches):
+        allowed = set().union(*(_patch_files(item) for item in patches))
         changed = {line.strip() for line in _git(path, 'diff', '--name-only').stdout.splitlines()}
         untracked = {line.strip() for line in _git(path, 'ls-files', '--others', '--exclude-standard').stdout.splitlines() if line.strip()}
-        if changed <= _patch_files(patch) and untracked <= _patch_files(patch):
+        if changed <= allowed and untracked <= allowed:
             return 'applied'
     return 'foreign'
 
@@ -71,15 +80,17 @@ def verify_checkout(path, pin, patch=None):
 
 def apply_patch(path, pin, patch):
     """Apply the reviewed patch to a checkout that is clean at the pin. Idempotent; refuses anything else."""
-    if not patch:
+    patches = _patch_list(patch)
+    if not patches:
         return 'none'
-    verify_checkout(path, pin, patch)
-    if patch_state(path, patch) == 'applied':
+    verify_checkout(path, pin, patches)
+    if patch_state(path, patches) == 'applied':
         return 'applied'
-    if _git(path, *_PATCH_FLAGS, '--check', str(patch), check=False).returncode:
-        raise ComponentError('The reviewed Hermes patch does not apply to this source; nothing was changed.')
-    _git(path, *_PATCH_FLAGS, str(patch))
-    verify_checkout(path, pin, patch)
+    for item in patches:                       # in order: a later patch is checked against the tree the earlier ones produced
+        if _git(path, *_PATCH_FLAGS, '--check', str(item), check=False).returncode:
+            raise ComponentError('The reviewed Hermes patch does not apply to this source; nothing was changed.')
+        _git(path, *_PATCH_FLAGS, str(item))
+    verify_checkout(path, pin, patches)
     return 'applied'
 
 

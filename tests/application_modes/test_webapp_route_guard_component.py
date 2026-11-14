@@ -27,6 +27,48 @@ class RouteGuardComponentTests(unittest.TestCase):
         self.assertEqual(manager.route_guard_state({'origin': 'adopted', 'agent': 'x'}), 'absent')
         self.assertEqual(manager.route_guard_state({'origin': 'managed', 'agent': str(ROOT / 'does-not-exist')}), 'unknown')
 
+    def test_a_new_release_carries_the_route_guard_then_the_mcp_recovery_patch(self):
+        manager = WebappComponent.__new__(WebappComponent)
+        manager.application_root = ROOT
+        patches = manager.webapp_patches()
+        self.assertEqual([item.name for item in patches], ['webapp-route-guard.patch', 'webapp-mcp-recovery.patch'])
+        self.assertTrue(all(item.is_file() for item in patches))
+
+    def test_a_patch_sequence_is_applied_in_order_and_recognised_as_a_whole_or_by_its_first_part(self):
+        with tempfile.TemporaryDirectory() as d:
+            repo = Path(d) / 'repo'
+            repo.mkdir()
+            subprocess.run(['git', 'init', '-q', str(repo)], check=True)
+            for name in ('a.txt', 'b.txt'):
+                (repo / name).write_text('one\n')
+            subprocess.run([*GIT, '-C', str(repo), 'add', '.'], check=True)
+            subprocess.run([*GIT, '-C', str(repo), 'commit', '-qm', 'c'], check=True)
+            patches = []
+            for name in ('a.txt', 'b.txt'):
+                (repo / name).write_text('two\n')
+                patch = Path(d) / f'{name}.patch'
+                patch.write_bytes(subprocess.run(['git', '-C', str(repo), 'diff', '--', name], capture_output=True, check=True).stdout)
+                subprocess.run(['git', '-C', str(repo), 'checkout', '-q', name], check=True)
+                patches.append(patch)
+            revision = subprocess.run(['git', '-C', str(repo), 'rev-parse', 'HEAD'], capture_output=True, text=True).stdout.strip()
+            pin = types.SimpleNamespace(revision=revision)
+            self.assertEqual(apply_patch(repo, pin, patches), 'applied')
+            self.assertEqual(apply_patch(repo, pin, patches), 'applied')      # idempotent
+            self.assertEqual(patch_state(repo, patches), 'applied')
+            self.assertEqual(patch_state(repo, patches[:1]), 'foreign', 'the first patch alone is not the whole applied tree')
+            self.assertEqual(patch_state(repo, patches[1:]), 'foreign')
+            (repo / 'a.txt').write_text('tampered\n')
+            self.assertEqual(patch_state(repo, patches), 'foreign')
+
+    def test_a_release_that_carries_only_the_route_guard_is_still_accepted_for_rollback(self):
+        manager = WebappComponent.__new__(WebappComponent)
+        manager.application_root = ROOT
+        calls = []
+        with mock.patch('src.hermes_webapp_component.patch_state', lambda path, patches: calls.append(patches) or
+                        ('applied' if patches == manager.route_guard_patch() else 'foreign')):
+            self.assertEqual(manager.applied_patches('x'), manager.route_guard_patch())
+            self.assertEqual(len(calls), 2)
+
     def test_patch_state_detects_a_tampered_source(self):
         with tempfile.TemporaryDirectory(dir=ROOT / '.release-tests' if (ROOT / '.release-tests').is_dir() else None) as d:
             repo = Path(d)

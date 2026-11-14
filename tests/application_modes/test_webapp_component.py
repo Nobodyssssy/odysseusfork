@@ -112,6 +112,7 @@ class ComponentCase(unittest.TestCase):
         guard = self.app / 'integrations/hermes-mode/patches'
         guard.mkdir(parents=True)
         shutil.copy(ROOT / 'integrations/hermes-mode/patches/webapp-route-guard.patch', guard / 'webapp-route-guard.patch')
+        shutil.copy(ROOT / 'integrations/hermes-mode/patches/webapp-mcp-recovery.patch', guard / 'webapp-mcp-recovery.patch')
         plugin = self.app / 'integrations/hermes-mode/desktop-plugins/odysseus-return'
         plugin.mkdir(parents=True)
         shutil.copy(ROOT / 'integrations/hermes-mode/desktop-plugins/odysseus-return/plugin.js', plugin / 'plugin.js')
@@ -133,7 +134,14 @@ class ComponentCase(unittest.TestCase):
                 return json.dumps({'config_present': True, 'webapp': {}, 'approvals_mode': 'manual', 'repo_scan_enabled': False, 'repo_scan_roots': 0,
                                    'sign_in_gate_configured': self.gate, 'plugins_enabled': []})
             return ''
+        self.runtime_installs = []
+        def fake_runtime_install(component, source, python, home, extras, log, env):
+            self.runtime_installs.append((Path(source).parent.name, Path(home).name, tuple(extras)))
+            if self.runtime_install_error:
+                raise ComponentError(self.runtime_install_error)
+        self.runtime_install_error = None
         patches = [mock.patch.object(hwc, 'probe_python', lambda *a, **k: {}), mock.patch.object(hwc, 'checkout_source', self.local_checkout),
+                   mock.patch.object(WebappComponent, '_install_runtime_extras', fake_runtime_install),
                    mock.patch.object(WebappComponent, '_hermes_yaml', fake_yaml),
                    # the fake upstream cannot carry the real patch; applying it to a real pin is covered by test_webapp_route_guard_component and the real install
                    mock.patch.object(WebappComponent, 'route_guard_state', lambda component, config: 'applied' if config.get('origin') == 'managed' else 'absent')]
@@ -145,7 +153,8 @@ class ComponentCase(unittest.TestCase):
         pin = {'repository': repository, 'revision': sha}
         (self.app / 'config/hermes-component.lock.json').write_text(json.dumps({
             'version': 1, 'agent': {'repository': 'NousResearch/hermes-agent', 'revision': sha},
-            'webui': {'repository': 'nesquena/hermes-webui', 'revision': 'f' * 40}, 'webapp': pin}), encoding='utf-8')
+            'webui': {'repository': 'nesquena/hermes-webui', 'revision': 'f' * 40}, 'webapp': pin,
+            'runtime': {'major': 3, 'minor': 14, 'owner': 'hermes-pm', 'extras': ['mcp']}}), encoding='utf-8')
 
     def local_checkout(self, target, pin, log_path, environment, patch=None):
         env = {**os.environ, 'GIT_CONFIG_GLOBAL': os.devnull, 'GIT_CONFIG_SYSTEM': os.devnull}
@@ -248,6 +257,28 @@ class ManagedTests(ComponentCase):
         build_dir = self.root / 'managed/webapp/tmp'
         self.assertIn('build-webapp.mjs', (build_dir / 'node-args.txt').read_text())
         self.assertEqual(read_webapp_config(self.component.config_path), config)
+
+    def test_every_new_release_installs_the_locks_runtime_extras_into_its_own_environment(self):
+        config = self.managed(repo_roots=None)
+        self.assertEqual(self.runtime_installs, [(config['release'], Path(config['home']).name, ('mcp',))])
+
+    def test_a_release_whose_runtime_extras_cannot_be_proven_is_never_ready_or_referenced(self):
+        self.runtime_install_error = 'The release environment cannot import mcp.client.stdio'
+        with self.assertRaises(ComponentError):
+            self.managed()
+        releases = list((self.component.directory / 'releases').iterdir())
+        self.assertEqual([json.loads((item / 'release.json').read_text())['state'] for item in releases], ['failed'])
+        self.assertIsNone(read_webapp_config(self.component.config_path))
+
+    def test_the_locks_runtime_extras_are_required_and_validated(self):
+        self.assertEqual(hwc.load_runtime_extras(self.app), ('mcp',))
+        lock = self.app / 'config/hermes-component.lock.json'
+        data = json.loads(lock.read_text(encoding='utf-8'))
+        for bad in (None, 'mcp', ['mcp; rm'], [3]):
+            data['runtime'] = {'extras': bad} if bad is not None else {}
+            lock.write_text(json.dumps(data), encoding='utf-8')
+            with self.assertRaises(ComponentError):
+                hwc.load_runtime_extras(self.app)
 
     def test_build_environment_carries_no_secrets_and_stays_inside_the_component(self):
         self.managed()

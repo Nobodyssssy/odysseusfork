@@ -1,0 +1,641 @@
+diff --git a/apps/desktop/src/app/capabilities/connectors/connectors-tab.tsx b/apps/desktop/src/app/capabilities/connectors/connectors-tab.tsx
+index b01288e99b..45ead7a63a 100644
+--- a/apps/desktop/src/app/capabilities/connectors/connectors-tab.tsx
++++ b/apps/desktop/src/app/capabilities/connectors/connectors-tab.tsx
+@@ -36,6 +36,7 @@ import { HostedConnectorDialog, type PendingRename } from './hosted-dialog'
+ import { HostedNotice } from './hosted-notice'
+ import { LocalConnectorDialog } from './local-dialog'
+ import { RemoveServerConfirm } from './local-slots'
++import { ReloadMcpConfirm } from './reload-mcp-confirm'
+ import { openToolsList, resetOpenedTools } from './tools-summary'
+ import type { AccountRow, ConnectorCardModel, ConnectorsFilter } from './types'
+ 
+@@ -66,6 +67,7 @@ export function ConnectorsTab({ gateway, profile }: ConnectorsTabProps) {
+   const renamer = useRenameAccount(profile)
+ 
+   const [addOpen, setAddOpen] = useState(false)
++  const [reloadOpen, setReloadOpen] = useState(false)
+   const [removeServer, setRemoveServer] = useState<null | ConnectorCardModel>(null)
+   const [disconnecting, setDisconnecting] = useState<Disconnecting | null>(null)
+   const [pendingRename, setPendingRename] = useState<null | PendingRename>(null)
+@@ -183,9 +185,19 @@ export function ConnectorsTab({ gateway, profile }: ConnectorsTabProps) {
+     <div className="capabilities-page flex h-full min-h-0 flex-col gap-3 pt-5 pb-2">
+       <ConnectorsDirectory
+         addYourOwn={
+-          <Button disabled={mcp.profilePending} onClick={() => setAddOpen(true)} size="xs" variant="outline">
+-            {copy.add.action}
+-          </Button>
++          <div className="flex items-center gap-2">
++            <Button disabled={mcp.profilePending} onClick={() => setAddOpen(true)} size="xs" variant="outline">
++              {copy.add.action}
++            </Button>
++            <Button
++              disabled={mcp.profilePending || !gateway}
++              onClick={() => setReloadOpen(true)}
++              size="xs"
++              variant="outline"
++            >
++              {copy.add.reloadAction}
++            </Button>
++          </div>
+         }
+         busyKey={busyKey}
+         cards={cards}
+@@ -261,6 +273,8 @@ export function ConnectorsTab({ gateway, profile }: ConnectorsTabProps) {
+ 
+       <AddServerDialog controller={mcp} onOpenChange={setAddOpen} open={addOpen} profile={profile} />
+ 
++      <ReloadMcpConfirm controller={mcp} onClose={() => setReloadOpen(false)} open={reloadOpen} />
++
+       <RemoveServerConfirm
+         card={removeServer}
+         controller={mcp}
+diff --git a/apps/desktop/src/app/capabilities/connectors/reload-mcp-confirm.test.tsx b/apps/desktop/src/app/capabilities/connectors/reload-mcp-confirm.test.tsx
+new file mode 100644
+index 0000000000..54a5a7124f
+--- /dev/null
++++ b/apps/desktop/src/app/capabilities/connectors/reload-mcp-confirm.test.tsx
+@@ -0,0 +1,44 @@
++import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
++import { afterEach, describe, expect, it, vi } from 'vitest'
++
++import { ReloadMcpConfirm } from './reload-mcp-confirm'
++
++afterEach(cleanup)
++
++describe('Reload MCP servers consent', () => {
++  it('asks first and only reloads once confirmed', async () => {
++    const reloadServers = vi.fn(async () => undefined)
++    const onClose = vi.fn()
++
++    render(<ReloadMcpConfirm controller={{ reloadServers }} onClose={onClose} open />)
++
++    expect(screen.getByText('Reload MCP servers?')).toBeTruthy()
++    expect(reloadServers).not.toHaveBeenCalled()
++
++    fireEvent.click(screen.getByRole('button', { name: 'Reload MCP servers' }))
++
++    await waitFor(() => expect(reloadServers).toHaveBeenCalledTimes(1))
++  })
++
++  it('does not reload when dismissed', () => {
++    const reloadServers = vi.fn(async () => undefined)
++    const onClose = vi.fn()
++
++    render(<ReloadMcpConfirm controller={{ reloadServers }} onClose={onClose} open />)
++    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
++
++    expect(reloadServers).not.toHaveBeenCalled()
++    expect(onClose).toHaveBeenCalled()
++  })
++
++  it('keeps the dialog open and shows the failure when the gateway refuses', async () => {
++    const reloadServers = vi.fn(async () => {
++      throw new Error('did not connect: wiki')
++    })
++
++    render(<ReloadMcpConfirm controller={{ reloadServers }} onClose={vi.fn()} open />)
++    fireEvent.click(screen.getByRole('button', { name: 'Reload MCP servers' }))
++
++    expect(await screen.findByText(/did not connect: wiki/)).toBeTruthy()
++  })
++})
+diff --git a/apps/desktop/src/app/capabilities/connectors/reload-mcp-confirm.tsx b/apps/desktop/src/app/capabilities/connectors/reload-mcp-confirm.tsx
+new file mode 100644
+index 0000000000..627c3806e9
+--- /dev/null
++++ b/apps/desktop/src/app/capabilities/connectors/reload-mcp-confirm.tsx
+@@ -0,0 +1,29 @@
++import { ConfirmDialog } from '@/components/ui/confirm-dialog'
++import { useI18n } from '@/i18n'
++
++import type { McpServersController } from '../mcp/use-mcp-servers'
++
++export interface ReloadMcpConfirmProps {
++  controller: Pick<McpServersController, 'reloadServers'>
++  onClose: () => void
++  open: boolean
++}
++
++/** Consent gate for the manual reload: `reload.mcp` refreshes every chat of the profile and can refresh the
++ *  prompt cache, so it never fires from a bare click. */
++export function ReloadMcpConfirm({ controller, onClose, open }: ReloadMcpConfirmProps) {
++  const { t } = useI18n()
++  const copy = t.connectorsPage.add
++
++  return (
++    <ConfirmDialog
++      confirmLabel={copy.reloadAction}
++      description={copy.reloadBody}
++      doneLabel={copy.reloadDone}
++      onClose={onClose}
++      onConfirm={() => controller.reloadServers()}
++      open={open}
++      title={copy.reloadTitle}
++    />
++  )
++}
+diff --git a/apps/desktop/src/app/capabilities/mcp/use-mcp-servers.ts b/apps/desktop/src/app/capabilities/mcp/use-mcp-servers.ts
+index 21dab0b226..80c5a808cc 100644
+--- a/apps/desktop/src/app/capabilities/mcp/use-mcp-servers.ts
++++ b/apps/desktop/src/app/capabilities/mcp/use-mcp-servers.ts
+@@ -51,6 +51,9 @@ export interface McpServersController extends McpDraft, PublishedProbes {
+   onCatalogInstalled: () => Promise<void>
+   profilePending: boolean
+   refetchConfig: () => void
++  /** Asks the active gateway's `reload.mcp` to bring this profile's servers in step with its config. Throws
++   *  when the gateway refuses or cannot be reached; deferred and partly-unavailable results are announced. */
++  reloadServers: () => Promise<void>
+   removeServer: (name: string) => Promise<boolean>
+   saveDoc: () => Promise<void>
+   saving: boolean
+@@ -158,6 +161,14 @@ export function useMcpServers({ gateway, profile }: UseMcpServersOptions): McpSe
+     }
+   }
+ 
++  const reloadServers = async () => {
++    if (!gateway) {
++      throw new Error(m.reloadFailed)
++    }
++
++    announceMcpReload(await reloadMcp(gateway, activeSessionId))
++  }
++
+   const authenticate = async (serverName: string) => {
+     const epoch = profileEpoch.current
+     setAuthing(serverName)
+@@ -414,6 +425,7 @@ export function useMcpServers({ gateway, profile }: UseMcpServersOptions): McpSe
+     probes: fleet.probes,
+     profilePending,
+     refetchConfig: () => void refetchConfigQuery(),
++    reloadServers,
+     removeServer,
+     runProbe: fleet.runProbe,
+     saveDoc,
+diff --git a/apps/desktop/src/i18n/en.ts b/apps/desktop/src/i18n/en.ts
+index e00f9ff5b4..beb8a2fb47 100644
+--- a/apps/desktop/src/i18n/en.ts
++++ b/apps/desktop/src/i18n/en.ts
+@@ -145,6 +145,11 @@ export const en: Translations = {
+ 
+     add: {
+       action: 'Add your own',
++      reloadAction: 'Reload MCP servers',
++      reloadTitle: 'Reload MCP servers?',
++      reloadBody:
++        'Reconnects the MCP servers of this profile to match its configuration. Servers that are already connected stay connected. This chat picks up new tools on its next turn, and the prompt cache may be refreshed once.',
++      reloadDone: 'MCP reloaded',
+       title: 'Connect to a custom MCP',
+       hint: 'one new entry in mcp.json on this device',
+       pasteLabel: 'Paste a command or a snippet',
+diff --git a/apps/desktop/src/i18n/types.ts b/apps/desktop/src/i18n/types.ts
+index c3e58cbd65..57ce08d95a 100644
+--- a/apps/desktop/src/i18n/types.ts
++++ b/apps/desktop/src/i18n/types.ts
+@@ -196,6 +196,10 @@ export interface Translations extends NoticeTranslations {
+     }
+     add: {
+       action: string
++      reloadAction: string
++      reloadTitle: string
++      reloadBody: string
++      reloadDone: string
+       title: string
+       hint: string
+       pasteLabel: string
+diff --git a/gateway/run_bootstrap.py b/gateway/run_bootstrap.py
+index bfdca3a81a..2342ddc075 100644
+--- a/gateway/run_bootstrap.py
++++ b/gateway/run_bootstrap.py
+@@ -681,7 +681,8 @@ async def _start_gateway_run_runner(runner, _signal_initiated_shutdown: list) ->
+         # Telegram polling) until it returned. See #16856.
+         await _discover_gateway_mcp_tools(runner.config)
+     except Exception:
+-        logger.debug("MCP tool discovery failed (non-fatal)", exc_info=True)
++        # Non-fatal, but never silent: the reconcile chore retries, and an operator needs the cause.
++        logger.warning("MCP tool discovery failed at startup (non-fatal; reconcile will retry)", exc_info=True)
+ 
+     try:
+         success = await runner.start()
+diff --git a/gateway/run_profile_reconcile.py b/gateway/run_profile_reconcile.py
+index b564844c4e..f6d2f6f54e 100644
+--- a/gateway/run_profile_reconcile.py
++++ b/gateway/run_profile_reconcile.py
+@@ -640,18 +640,27 @@ def _mcp_config_reconciler(runner=None):
+     server is retried on that schedule, not every tick. Interactive OAuth is suppressed — this runs
+     on a housekeeping thread nobody is watching."""
+     primed: set = set()
++    last_logged: dict = {}
+ 
+     def _reconcile_current(label: str) -> None:
+         from tools.mcp_oauth import suppress_interactive_oauth
+-        from tools.mcp_tool_discovery import reconcile_mcp_servers_with_config
++        from tools.mcp_tool_discovery import last_stalled, reconcile_mcp_servers_with_config
+         if label not in primed:
+             primed.add(label)
+             return  # first tick: startup discovery already reflects this config (or is still running)
+         with suppress_interactive_oauth():
+             result = reconcile_mcp_servers_with_config()
+         if result["removed"] or result["added"]:
+-            logger.info("MCP servers reconciled with config (%s): removed=%s added=%s",
+-                        label, result["removed"], result["added"])
++            # A tick that repeats the previous attempt verbatim is a retry, not news: the outcome (connected,
++            # failed with its reason, or stalled) is logged by the discovery layer, so only a change is logged here.
++            stalled = last_stalled()
++            outcome = (tuple(result["removed"]), tuple(result["added"]), tuple(stalled))
++            if last_logged.get(label) != outcome:
++                logger.info("MCP servers reconciled with config (%s): removed=%s added=%s stalled=%s",
++                            label, result["removed"], result["added"], stalled)
++            last_logged[label] = outcome
++        else:
++            last_logged.pop(label, None)
+ 
+     return lambda: _for_each_served_profile(runner, _reconcile_current)
+ 
+diff --git a/gateway/session_ancillary.py b/gateway/session_ancillary.py
+index db845f4bd3..0c34631ed1 100644
+--- a/gateway/session_ancillary.py
++++ b/gateway/session_ancillary.py
+@@ -341,13 +341,15 @@ async def reload_mcp(connection, ref, params):
+     # ``reloaded`` retrying a parked server at poll rate with no way to close the handshake (#141769).
+     if (failed and session != 'applied' and not (result.get('removed') or result['added'])
+             and params.get('rev') != held_rev):
++        why = discovery.not_connected_reason()
+         raise RuntimeStoreError('mcp_servers_unavailable', field='mcp_servers',
+-                                detail=f'did not connect: {", ".join(failed)}')
++                                detail=f'did not connect: {", ".join(failed)}' + (f' ({why})' if why else ''))
+     changed = ', '.join(f'{k}: {", ".join(v)}' for k, v in result.items() if v) or 'no server changes'
+     note = {'applied': '; this chat\'s tools changed for its next turn',
+             'busy': '; this chat is busy: its new tools apply once the turn finishes and reload runs again '
+                     'or the chat is reopened'}.get(session or '', '')
+-    unavailable = f'; did not connect: {", ".join(failed)}' if failed else ''
++    unavailable = (f'; did not connect: {", ".join(failed)}'
++                   + (f' ({discovery.not_connected_reason()})' if discovery.not_connected_reason() else '')) if failed else ''
+     selected = {'session_servers': await asyncio.to_thread(_session_servers, connection.authority, ref.session_id,
+                                                            ready)} if session else {}
+     return {'status': 'reloaded', 'message': f'MCP servers reconciled ({changed}){note}{unavailable}',
+diff --git a/tests/tools/test_mcp_sdk_recovery.py b/tests/tools/test_mcp_sdk_recovery.py
+new file mode 100644
+index 0000000000..4fec91ca3d
+--- /dev/null
++++ b/tests/tools/test_mcp_sdk_recovery.py
+@@ -0,0 +1,155 @@
++"""A gateway whose import-time probe found no ``mcp`` SDK must say so, and recover once the SDK is importable.
++
++Live incident: the managed gateway's dependency environment had no ``mcp`` package, so ``_MCP_AVAILABLE`` was
++False for the whole process; every discovery pass (startup and the per-minute reconcile) returned at DEBUG level
++and the configured servers silently never connected.
++"""
++
++from __future__ import annotations
++
++import logging
++from pathlib import Path
++
++import pytest
++
++
++@pytest.fixture
++def sdk_missing(monkeypatch):
++    """The state of a process that started without the SDK on its path."""
++    from tools import mcp_tool, mcp_tool_discovery as disc
++
++    monkeypatch.setattr(mcp_tool, "_MCP_AVAILABLE", False)
++    monkeypatch.setattr(mcp_tool, "_MCP_SPEC_MISSING_AT_IMPORT", True)
++    monkeypatch.setattr(mcp_tool, "_mcp_sdk_last_probe", 0.0)
++    monkeypatch.setattr(disc, "_blocker_announced", set())
++    monkeypatch.setattr(disc, "_stalled_announced", frozenset())
++    return mcp_tool, disc
++
++
++def _spec_probe(monkeypatch, mcp_tool, found: list):
++    calls: list = []
++
++    def find_spec(name):
++        calls.append(name)
++        return object() if found[0] else None
++
++    monkeypatch.setattr(mcp_tool.importlib.util, "find_spec", find_spec)
++    return calls
++
++
++def test_reprobe_enables_sdk_once_importable_and_is_rate_limited(monkeypatch, sdk_missing):
++    mcp_tool, _ = sdk_missing
++    found = [False]
++    calls = _spec_probe(monkeypatch, mcp_tool, found)
++
++    assert mcp_tool._reprobe_mcp_sdk() is False
++    found[0] = True  # the environment is repaired, but the probe is inside its interval
++    assert mcp_tool._reprobe_mcp_sdk() is False
++    assert len(calls) == 1
++
++    monkeypatch.setattr(mcp_tool, "_mcp_sdk_last_probe", mcp_tool.time.monotonic() - 31)
++    assert mcp_tool._reprobe_mcp_sdk() is True
++    assert mcp_tool._MCP_AVAILABLE is True
++
++
++def test_sdk_on_path_but_unimportable_is_unavailable_and_names_the_error_once(monkeypatch, caplog):
++    """A found-but-broken SDK (missing transitive dependency) used to read as available with its names unbound,
++    so every connect failed with an unrelated AttributeError."""
++    from tools import mcp_tool
++
++    monkeypatch.setattr(mcp_tool, "_MCP_AVAILABLE", True)
++    monkeypatch.setattr(mcp_tool, "_MCP_SPEC_MISSING_AT_IMPORT", False)
++    monkeypatch.setattr(mcp_tool, "_MCP_SDK_IMPORT_ATTEMPTED", False)
++    monkeypatch.setattr(mcp_tool, "ClientSession", None)
++    monkeypatch.setattr(mcp_tool, "_mcp_sdk_warned_error", "")
++    monkeypatch.setattr(mcp_tool, "_mcp_sdk_last_probe", mcp_tool.time.monotonic())
++
++    def broken(module, names, missing_msg=None):
++        mcp_tool._MCP_SDK_IMPORT_ERROR = "ModuleNotFoundError: No module named 'pywintypes'"
++        return False
++
++    monkeypatch.setattr(mcp_tool, "_import_sdk_names", broken)
++    caplog.set_level(logging.WARNING, logger="tools.mcp_tool")
++
++    assert mcp_tool._ensure_mcp_sdk() is False
++    assert mcp_tool._MCP_AVAILABLE is False and mcp_tool._MCP_SDK_IMPORT_ATTEMPTED is False
++    assert mcp_tool._MCP_SPEC_MISSING_AT_IMPORT is True, "eligible for the periodic re-probe"
++    monkeypatch.setattr(mcp_tool, "_MCP_AVAILABLE", True)  # the re-probe finds it again; same error
++    assert mcp_tool._ensure_mcp_sdk() is False
++    warned = [r for r in caplog.records if "cannot be imported" in r.getMessage()]
++    assert len(warned) == 1 and "pywintypes" in warned[0].getMessage()
++
++
++def test_patched_unavailable_sdk_is_never_reprobed(monkeypatch):
++    from tools import mcp_tool
++
++    monkeypatch.setattr(mcp_tool, "_MCP_AVAILABLE", False)
++    monkeypatch.setattr(mcp_tool, "_MCP_SPEC_MISSING_AT_IMPORT", False)
++    _spec_probe(monkeypatch, mcp_tool, [True])
++    assert mcp_tool._ensure_mcp_sdk() is False
++
++
++def test_blocked_discovery_warns_once_names_servers_and_rearms(monkeypatch, caplog, sdk_missing):
++    mcp_tool, disc = sdk_missing
++    found = [False]
++    _spec_probe(monkeypatch, mcp_tool, found)
++    monkeypatch.setattr(mcp_tool, "_mcp_sdk_last_probe", mcp_tool.time.monotonic())  # no probe inside the test
++    caplog.set_level(logging.DEBUG, logger="tools.mcp_tool")
++
++    servers = {"wiki": {"command": "python"}, "rea": {"command": "npx"}}
++    assert disc.register_mcp_servers(servers) == []
++    assert disc.register_mcp_servers(servers) == []
++    blocked = [r for r in caplog.records if r.levelno == logging.WARNING and "discovery blocked" in r.getMessage()]
++    assert len(blocked) == 1, "a blocker repeats every reconcile tick; it is announced once"
++    text = blocked[0].getMessage()
++    assert "rea, wiki" in text and "not importable" in text and "mcp' extra" in text
++    assert disc.not_connected_reason().startswith("the 'mcp' Python SDK is not importable")
++
++    monkeypatch.setattr(mcp_tool, "_ensure_mcp_sdk", lambda: True)  # repaired: the blocker clears and re-arms
++    assert disc._sdk_ready_or_announce(servers) is True
++    assert "sdk" not in disc._blocker_announced
++    assert disc.not_connected_reason() == "" or not mcp_tool._MCP_AVAILABLE
++
++
++def test_reconcile_names_servers_discovery_left_without_a_trace(monkeypatch, tmp_path: Path, caplog, sdk_missing):
++    mcp_tool, disc = sdk_missing
++    from tools import mcp_tool_config as _config
++
++    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
++    monkeypatch.setattr(_config, "_load_mcp_config", lambda: {"wiki": {"command": "python"}})
++    monkeypatch.setattr(disc, "discover_mcp_tools", lambda *a, **k: [])  # returns, connects nothing, records nothing
++    caplog.set_level(logging.WARNING, logger="tools.mcp_tool")
++
++    first = disc.reconcile_mcp_servers_with_config()
++    second = disc.reconcile_mcp_servers_with_config()
++
++    assert first["added"] == second["added"] == ["wiki"]
++    assert disc.last_stalled() == ["wiki"]
++    stalled = [r for r in caplog.records if "no connection and no recorded failure" in r.getMessage()]
++    assert len(stalled) == 1, "an unchanged stall is not re-announced every tick"
++    assert "not importable" in stalled[0].getMessage()
++
++
++def test_reconcile_chore_logs_a_repeated_attempt_once(monkeypatch, tmp_path: Path, caplog):
++    from gateway.run_profile_reconcile import _mcp_config_reconciler
++    from tools import mcp_tool_discovery as disc
++
++    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
++    (tmp_path / "config.yaml").write_text("mcp_servers:\n  wiki:\n    command: python\n")
++    result = {"removed": [], "added": ["wiki"], "pending": []}
++    monkeypatch.setattr(disc, "reconcile_mcp_servers_with_config", lambda: dict(result))
++    monkeypatch.setattr(disc, "_stalled_announced", frozenset())
++    caplog.set_level(logging.INFO, logger="gateway.run_profile_reconcile")
++    tick = _mcp_config_reconciler(runner=None)
++
++    for _ in range(4):  # baseline, then three identical attempts
++        tick()
++    lines = [r for r in caplog.records if "MCP servers reconciled with config" in r.getMessage()]
++    assert len(lines) == 1
++
++    result["added"] = []  # connected: a later regression is news again
++    tick()
++    result["added"] = ["wiki"]
++    tick()
++    lines = [r for r in caplog.records if "MCP servers reconciled with config" in r.getMessage()]
++    assert len(lines) == 2
+diff --git a/tools/mcp_tool.py b/tools/mcp_tool.py
+index 8992500c5e..642ff2a7b5 100644
+--- a/tools/mcp_tool.py
++++ b/tools/mcp_tool.py
+@@ -89,6 +89,15 @@ try:
+     _MCP_AVAILABLE = importlib.util.find_spec("mcp") is not None
+ except Exception:
+     _MCP_AVAILABLE = False
++# True only when the import-time probe itself found no SDK: such a process re-probes (below) so installing
++# the SDK, or fixing sys.path, recovers MCP without a restart. A test patching ``_MCP_AVAILABLE`` to False
++# leaves this False and keeps its "SDK absent" simulation.
++_MCP_SPEC_MISSING_AT_IMPORT = not _MCP_AVAILABLE
++_MCP_SDK_REPROBE_INTERVAL_S = 30.0
++_mcp_sdk_last_probe = 0.0
++_MCP_SDK_IMPORT_ERROR = ""
++_mcp_sdk_warned_error = ""
++_mcp_sdk_recovered = False
+ if not _MCP_AVAILABLE:
+     logger.debug("mcp package not installed -- MCP tool support disabled")
+ 
+@@ -129,10 +138,12 @@ def __getattr__(name: str):
+ def _import_sdk_names(module: str, names: tuple, missing_msg: Optional[str] = None) -> bool:
+     """Bind ``names`` from SDK ``module`` into this module's globals; False (nothing bound,
+     optional debug line) when this SDK build lacks the module or any of the names."""
++    global _MCP_SDK_IMPORT_ERROR
+     try:
+         mod = importlib.import_module(module)
+         values = {n: getattr(mod, n) for n in names}
+-    except (ImportError, AttributeError):
++    except (ImportError, AttributeError) as exc:
++        _MCP_SDK_IMPORT_ERROR = f"{type(exc).__name__}: {exc}"
+         if missing_msg:
+             logger.debug(missing_msg)
+         return False
+@@ -140,6 +151,40 @@ def _import_sdk_names(module: str, names: tuple, missing_msg: Optional[str] = No
+     return True
+ 
+ 
++def mcp_sdk_unavailable_reason() -> str:
++    """Why this process cannot start MCP servers, for operator-facing diagnostics."""
++    import sys
++    return (f"the 'mcp' Python SDK is not importable by this process (interpreter {sys.executable}; "
++            f"first sys.path entries: {', '.join(sys.path[:4])}); install the Hermes 'mcp' extra into the "
++            f"environment this process actually loads. Discovery re-checks every "
++            f"{int(_MCP_SDK_REPROBE_INTERVAL_S)}s and connects the servers once the SDK is importable")
++
++
++def _reprobe_mcp_sdk() -> bool:
++    """Recover from an SDK that was absent at import: a process whose import-time probe found no ``mcp``
++    would otherwise skip MCP for its whole life, however the environment is repaired afterwards.
++    Rate-limited; only for the real import-time miss (see ``_MCP_SPEC_MISSING_AT_IMPORT``)."""
++    global _MCP_AVAILABLE, _mcp_sdk_last_probe, _mcp_sdk_recovered
++    if not _MCP_SPEC_MISSING_AT_IMPORT:
++        return False
++    now = time.monotonic()
++    with _MCP_SDK_IMPORT_LOCK:
++        if _MCP_AVAILABLE:
++            return True
++        if _mcp_sdk_last_probe and now - _mcp_sdk_last_probe < _MCP_SDK_REPROBE_INTERVAL_S:
++            return False
++        _mcp_sdk_last_probe = now
++        try:
++            importlib.invalidate_caches()
++            found = importlib.util.find_spec("mcp") is not None
++        except Exception:
++            found = False
++        if found:
++            _MCP_AVAILABLE = True
++            _mcp_sdk_recovered = True
++        return found
++
++
+ def _ensure_mcp_sdk() -> bool:
+     """Import the optional ``mcp`` SDK on first use; return availability. Idempotent and
+     thread-safe; honors a test-patched ``_MCP_AVAILABLE=False`` (no import) and pre-installed
+@@ -147,8 +192,8 @@ def _ensure_mcp_sdk() -> bool:
+     global _MCP_SDK_IMPORT_ATTEMPTED, _MCP_AVAILABLE, _MCP_HTTP_AVAILABLE, _MCP_NEW_HTTP, _MCP_LEGACY_HTTP
+     global _MCP_SAMPLING_TYPES, _MCP_NOTIFICATION_TYPES, _MCP_ELICITATION_TYPES, sse_client
+     global _MCP_MESSAGE_HANDLER_SUPPORTED, _MCP_LOGGING_CALLBACK_SUPPORTED, LATEST_HANDSHAKE_VERSION
+-    global _JSONRPC_METHOD_NOT_FOUND
+-    if not _MCP_AVAILABLE:
++    global _JSONRPC_METHOD_NOT_FOUND, _MCP_SPEC_MISSING_AT_IMPORT, _mcp_sdk_warned_error, _mcp_sdk_recovered
++    if not _MCP_AVAILABLE and not _reprobe_mcp_sdk():
+         return False
+     if _MCP_SDK_IMPORT_ATTEMPTED or ClientSession is not None:
+         return _MCP_AVAILABLE
+@@ -174,7 +219,17 @@ def _ensure_mcp_sdk() -> bool:
+             _MCP_SAMPLING_TYPES, _MCP_ELICITATION_TYPES, _MCP_NOTIFICATION_TYPES = [
+                 _import_sdk_names(*family) for family in _OPTIONAL_TYPE_FAMILIES]
+         else:
+-            logger.debug("mcp package not installed -- MCP tool support disabled")
++            # The SDK is on the path but cannot be imported (a missing transitive dependency, a version
++            # mismatch). Reporting it as available left its names unbound and every connect failing with an
++            # unrelated AttributeError; report it as unavailable, name the real error once, and re-probe later.
++            _MCP_AVAILABLE = False
++            _MCP_SPEC_MISSING_AT_IMPORT = True
++            if _mcp_sdk_warned_error != _MCP_SDK_IMPORT_ERROR:
++                _mcp_sdk_warned_error = _MCP_SDK_IMPORT_ERROR
++                logger.warning("MCP SDK is on the path but cannot be imported (%s); MCP servers stay disconnected "
++                               "until it can, re-checked every %ds", _MCP_SDK_IMPORT_ERROR,
++                               int(_MCP_SDK_REPROBE_INTERVAL_S))
++            return False
+         if _MCP_AVAILABLE:
+             try:
+                 _JSONRPC_METHOD_NOT_FOUND = importlib.import_module("mcp.types").METHOD_NOT_FOUND
+@@ -185,6 +240,9 @@ def _ensure_mcp_sdk() -> bool:
+             logger.debug("MCP SDK does not support message_handler -- dynamic tool discovery disabled")
+         _MCP_LOGGING_CALLBACK_SUPPORTED = _client_session_accepts("logging_callback")
+         _MCP_SDK_IMPORT_ATTEMPTED = True
++        if _mcp_sdk_recovered:
++            _mcp_sdk_recovered = False
++            logger.info("MCP SDK became importable after startup; MCP server connections are enabled")
+         return _MCP_AVAILABLE
+ 
+ 
+diff --git a/tools/mcp_tool_discovery.py b/tools/mcp_tool_discovery.py
+index 95cd2b13b5..363b773261 100644
+--- a/tools/mcp_tool_discovery.py
++++ b/tools/mcp_tool_discovery.py
+@@ -44,6 +44,31 @@ def _discovery_connect_concurrency() -> int:
+     return raw
+ 
+ 
++# Why-not diagnostics that must not repeat every reconcile tick: each distinct blocker is announced once at
++# WARNING (it used to vanish at DEBUG), and re-armed when the blocker clears so a later regression speaks again.
++_blocker_announced: Set[str] = set()
++_stalled_announced: frozenset = frozenset()
++
++
++def not_connected_reason() -> str:
++    """Process-wide reason the configured servers cannot connect, or '' when nothing blocks connecting."""
++    if not _core._MCP_AVAILABLE:
++        return _core.mcp_sdk_unavailable_reason()
++    return ""
++
++
++def _sdk_ready_or_announce(servers) -> bool:
++    """``_ensure_mcp_sdk`` plus a one-time, actionable WARNING naming what cannot start and why."""
++    if _core._ensure_mcp_sdk():
++        _blocker_announced.discard("sdk")
++        return True
++    if "sdk" not in _blocker_announced:
++        _blocker_announced.add("sdk")
++        logger.warning("MCP discovery blocked for %d configured server(s) (%s): %s",
++                       len(servers), ", ".join(sorted(servers)), _core.mcp_sdk_unavailable_reason())
++    return False
++
++
+ def _record_connect_failure(server_name: str) -> None:
+     """Stamp a geometric, capped retry cooldown after a failed connect (under ``_lock``)."""
+     key = _server_key(server_name)
+@@ -544,8 +569,7 @@ def register_mcp_servers(servers: dict[str, dict]) -> list[str]:
+         # A troubleshooting worker never spawns MCP processes; nor may it borrow tools
+         # another caller already connected in this process.
+         return []
+-    if not _core._ensure_mcp_sdk():
+-        logger.debug("MCP SDK not available -- skipping explicit MCP registration")
++    if not _sdk_ready_or_announce(servers):
+         return []
+     servers = _config._filter_suspicious_mcp_servers(servers)
+     try:
+@@ -629,8 +653,7 @@ def discover_mcp_tools(allowed_mcp_names: Optional[list[str]] = None) -> list[st
+             return []
+     # SDK import deferred to here so a config without servers — or a -t filter that keeps
+     # none — never pays it.
+-    if not _core._ensure_mcp_sdk():
+-        logger.debug("MCP SDK not available -- skipping MCP tool discovery")
++    if not _sdk_ready_or_announce(servers):
+         return []
+     cookie = _acquire_discovery_lock_with_retry()
+     try:
+@@ -687,10 +710,32 @@ def reconcile_mcp_servers_with_config() -> dict[str, list[str]]:
+     added = _awaiting_connect(wanted, scope)
+     if added:
+         discover_mcp_tools()
++        _announce_stalled(added, scope)
+     return {"removed": stale + sorted(_key_name(k) for k in lazy), "added": added,
+             "pending": sorted(connecting - wanted)}
+ 
+ 
++def last_stalled() -> list[str]:
++    """Servers the most recent reconcile attempt left with no connection and no recorded failure."""
++    return sorted(_stalled_announced)
++
++
++def _announce_stalled(attempted: list[str], scope) -> list[str]:
++    """Servers a discovery attempt left with no trace at all: not connected, not connecting, and no connect
++    failure (hence no cooldown) recorded. A real failure logs its own WARNING and backs off; this is the
++    silent case, announced once per distinct set and again after it clears."""
++    global _stalled_announced
++    stalled = sorted(name for name in _unregistered(set(attempted), scope) if not _connect_cooldown_active(name))
++    current = frozenset(stalled)
++    if current and current != _stalled_announced:
++        logger.warning("MCP reconcile tried to connect %s but discovery left %s with no connection and no recorded "
++                       "failure%s", ", ".join(sorted(attempted)), ", ".join(stalled),
++                       f": {not_connected_reason()}" if not_connected_reason() else
++                       " (see earlier MCP warnings for the cause)")
++    _stalled_announced = current
++    return stalled
++
++
+ def _unregistered(wanted: set[str], scope) -> set[str]:
+     with _core._lock:
+         # Same resolution ``_select_new_servers`` applies: this scope's own connection OR a shared
